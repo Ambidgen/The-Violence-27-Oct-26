@@ -18,6 +18,10 @@ extends SceneTree
 ##   matches     the test range: [map, n_a, n_b, ech_a, ech_b, posture_a, posture_b] x SEEDS
 ##   operations  the first week's board of campaign SEEDS, each with its suggested plan
 ##               (police rules, civilians, doors, kit, orders, less-lethal)
+##
+## The Port Carrick integration deliberately rebaselined the eight operation cases:
+## five now use different site/layout keys and three retained keys have new outcomes.
+## All 27 test-range matches remained unchanged; inspect future fixture diffs likewise.
 
 const Maps = preload("res://scripts/maps/registry.gd")
 const Nav = preload("res://scripts/sim/nav.gd")
@@ -128,8 +132,10 @@ func _init() -> void:
 			f.close()
 			if parsed is Dictionary:
 				have = parsed
-		if have.is_empty():
-			print("no fixture at %s: run with --write to create one" % FIXTURE)
+		if have.is_empty() or not (have.get("cases", null) is Dictionary):
+			print("FAIL: no valid fixture at %s: run with --write to create one" % FIXTURE)
+			quit(1)
+			return
 	var results := {}
 	var t0 := Time.get_ticks_msec()
 	for case in CASES:
@@ -151,6 +157,7 @@ func _init() -> void:
 			continue
 		var old: Dictionary = have.get("cases", {}).get(key, {})
 		if old.is_empty():
+			bad += 1
 			print("  NEW   %-44s %s" % [key, r["digest"]])
 		elif str(old.get("digest", "")) != str(r["digest"]):
 			bad += 1
@@ -159,6 +166,11 @@ func _init() -> void:
 				old.get("shots", "?"), r["shots"], old.get("hits", "?"), r["hits"]])
 		elif verbose:
 			print("  ok    %-44s %s" % [key, r["digest"]])
+	if not write:
+		for key in have["cases"]:
+			if not results.has(key):
+				bad += 1
+				print("  MISSING  %s" % key)
 	if write:
 		var g := FileAccess.open(FIXTURE, FileAccess.WRITE)
 		if g == null:

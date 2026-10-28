@@ -30,6 +30,8 @@ var look_key := ""
 var shield: Sprite2D
 var ram: Sprite2D
 var helmet: Sprite2D
+var armour: Sprite2D
+var mask: Sprite2D
 var _last_hit := Vector2.ZERO
 
 
@@ -44,27 +46,33 @@ func setup(o, w) -> void:
 	rig.setup(team, hash(o.id))
 	# what they carry, seen from above (v0.7.5)
 	var kit: Dictionary = o.kit if "kit" in o else {}
-	if not o.civ and kit.get("armour", "none") != "none":
-		rig.wear("kit/plates" if kit["armour"] == "plates" else "kit/vest", false)
+	if kit.get("armour", "none") != "none":
+		armour = rig.wear("kit/plates" if kit["armour"] == "plates" else "kit/vest", false)
+		armour.visible = not o.civ
 	if kit.get("head", "none") in ["sof_helmet", "ballistic_helmet"]:
-		helmet = rig.wear("kit/helmet_head", true)
+		# A public-order visor is only shown when a real helmet was equipped.
+		helmet = rig.wear("kit/riot_head" if team == "riot" else "kit/helmet_head", true)
+		helmet.visible = not o.civ
 	if o.gear.has("gas_mask"):
-		rig.wear("kit/gas_mask_head", true)
+		mask = rig.wear("kit/gas_mask_head", true)
+		mask.visible = not o.civ
 	if o.shield:
 		shield = Sprite2D.new()
 		shield.texture = Decals.tex("kit/shield")
 		shield.scale = Vector2.ONE * 0.5
+		shield.visible = not o.civ
 		add_child(shield)
 	if int(o.gear.get("ram", 0)) > 0:
 		ram = Sprite2D.new()
 		ram.texture = Decals.tex("kit/ram")
 		ram.scale = Vector2.ONE * 0.5
+		ram.visible = not o.civ
 		add_child(ram)
 	pip = Pip.new()
 	pip.op = o
 	add_child(pip)
 	label = Label.new()
-	label.text = o.id
+	label.text = Palette.display_id(o, w)
 	label.add_theme_font_size_override("font_size", 11)
 	label.add_theme_color_override("font_color", Color("#141313"))
 	label.position = Vector2(-26, -30)
@@ -111,6 +119,7 @@ func sync(force := false) -> void:
 	if op == null:
 		return
 	var dt := get_process_delta_time() if not force else 0.0
+	label.text = Palette.display_id(op, world)
 	position = op.pos * PX
 	var down: bool = not op.alive()
 	if down and not was_down:
@@ -139,12 +148,20 @@ func sync(force := false) -> void:
 	if visible and (force or Rig.view.has_point(position)):
 		_drive()
 		rig.advance(dt, position)
+	# A concealed attacker must not expose any carried kit; it becomes visible on reveal.
+	if armour != null:
+		armour.visible = not op.civ
+	if mask != null:
+		mask.visible = not op.civ
 	if helmet != null:
+		helmet.visible = not op.civ
 		helmet.modulate.a = 1.0 if (op.helmet or op.helmet_ballistic) else 0.45
 	if shield != null:
+		shield.visible = not op.civ
 		shield.rotation = op.body_dir
 		shield.position = rig.torso.position + Vector2.from_angle(op.body_dir) * 13.0
 	if ram != null:
+		ram.visible = not op.civ
 		ram.rotation = op.body_dir
 		var off := Vector2.from_angle(op.body_dir + PI / 2.0) * 11.0 - Vector2.from_angle(op.body_dir) * 6.0
 		ram.position = rig.torso.position + off

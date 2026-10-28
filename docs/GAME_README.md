@@ -6,10 +6,9 @@ This checkout contains the game source, maps, campaign systems, cutscenes, and h
 
 ## Run the game
 
-1. Install **Godot 4.4 or newer**. The primary engine is **4.7.2**; **4.4.1**
-   is still supported and both are declared in `project.godot`.
+1. Install **Godot 4.4 or newer**. The project declares 4.4 and 4.7 compatibility; 4.7.2 is the primary target and 4.4.1 the compatibility target. See the root README and test results for current verification, rather than assuming every version or platform has been tested.
 2. Import `project.godot` in the Godot editor.
-3. Run the main scene (`scenes/main.tscn`) or press **F6/F5** as appropriate for your editor setup.
+3. Press **F5** to run the project (`scenes/main.tscn`), or use `./play.sh` on Linux.
 
 The project uses the compatibility renderer. The title screen offers three ways to play:
 
@@ -25,10 +24,22 @@ Each week the operations board deals warrants, crew-house raids, barricaded susp
 For a situation, work through:
 
 1. **Briefing:** read confirmed facts, estimates, confidence, tips, time pressure, and the readiness range. The range is a planning index built from public intelligence and assigned force; it is **not a win probability**. Canvassing buys two tips but commits an officer for the week.
-2. **Force:** form up to five squads of six, assign officers, and buy or return equipment within the budget and training restrictions. **Suggest a plan** is an editable starting point; Veteran chief mode removes it.
+2. **Force:** form up to five squads of six, assign officers, and buy or return equipment within the budget and training restrictions. **Suggest a plan** is an editable starting point and does not buy kit on its own; Veteran chief mode removes it.
 3. **Orders:** choose objectives and constraints. Order points depend on squad leadership and experience. The plan is a starting intention, not a script that guarantees compliance.
 4. **Run:** watch the operation under fog of war. Officers judge, perceive, react, and fight using their training, habits, stress, and orders. You do not steer individual officers.
 5. **Debrief:** read the itemized score arithmetic, officer and civilian outcomes, findings, and department consequences. Click any timeline event to seek the replay to that moment.
+
+### Port Carrick on the board
+
+The overview shows the official model's ward shapes, river, harbour basins and major streets. Numbers correspond to the week's calls; hover over a pin to see its canonical name and address. The six trust indicators use the same ward order as existing saves. The briefing names the official site and makes clear that the tactical layout is **schematic**. Fourteen compatible sites can be selected for recurring calls; other sites are not silently substituted. The generator itself is not needed to play.
+
+Old saved boards retain their original locations and are marked unlocated when they have no canonical coordinates; the game does not retroactively invent them. A missing or invalid city resource produces a warning and an unlocated call without ward-specific political effects. New boards snapshot the canonical site metadata, so an already-saved call remains stable if the city is later regenerated. See [`../port-carrick/README.md`](../port-carrick/README.md) for the site-to-layout table and maintenance instructions.
+
+### Character appearances
+
+The animated top-down roster has patrol uniforms, SWAT-style tactical uniforms, public-order/riot uniforms, and five distinct criminal clothing models. Ordinary officers use patrol; police-tactical or quick-response units and officers with plates or a helmet use SWAT outside public events; event officers use the riot look. Criminal looks are stable for an operation and are selected without consuming gameplay randomness. The four city gangs each have a distinct clothing family, and civilians and medics retain their own looks.
+
+These appearances are **cosmetic**: a soft cap or padded-looking uniform does not add protection. Actual armour, helmets, shields and other equipment come from the officer's kit; the riot visor appears only over an equipped helmet. The debrief replay retains the look and equipment, and a concealed attacker remains dressed as a civilian until the attack is revealed. These are 2D animated sprites, not 3D models.
 
 The first operation includes an optional four-step guide covering Briefing, Force, Orders, and Debrief. It can be skipped and is controlled by the first-weeks tips setting.
 
@@ -72,7 +83,7 @@ Election night prints a run score and records the run in `user://legacy.json`.
 
 ## Saves and version
 
-Campaign and settings data live under Godot's `user://` directory. The campaign save is versioned and older compatible saves are accepted. Do not run multiple game instances against the same save slot.
+Campaign and settings data live under Godot's `user://` directory. The campaign save is versioned and older compatible saves are accepted. A corrupt or semantically invalid primary save is checked against the `.bak` copy; when recovery succeeds, the first save preserves the good backup instead of replacing it with the corrupt primary. A save from a newer, unsupported version is not automatically downgraded or overwritten. The title screen warns if a save cannot be loaded and asks for confirmation before starting a new run over it. Keep independent backups, and do not run multiple game instances against the same save slot.
 
 The canonical runtime version is `scripts/version.gd` (`Version.VALUE`). After changing it, synchronize Godot's metadata with:
 
@@ -87,23 +98,21 @@ Commit `scripts/version.gd`, `project.godot`, and `export_presets.cfg` together.
 One command runs them in tiers and keeps a log per suite:
 
 ```sh
-tools/run_tests.sh --check     # load every script (seconds)
+tools/run_tests.sh --list      # see suites and timeouts without running Godot
+tools/run_tests.sh --check     # load every script
 tools/run_tests.sh --quick     # the gates a commit should pass (default)
 tools/run_tests.sh --full      # + determinism, simulation, campaign and soak suites
 tools/run_tests.sh --soak      # + the asserted balance matrix (long)
 GODOT=/path/to/godot tools/run_tests.sh --full
 ```
 
-The runner exits non-zero if any suite fails, scans the logs of the harnesses
-that do not set an exit code, and writes `build/test-logs/<suite>.log`. The same
-tiers run in CI (`tools/ci/ci.yml` — move it to `.github/workflows/ci.yml` to
-activate it) on 4.7.2 and on 4.4.1, the engine the Windows build uses. Run the suites individually when you are debugging one
-of them; otherwise prefer the runner.
+The runner exits nonzero for a failure, script or engine error, or timeout and writes `build/test-logs/<suite>.log`. Use `JOBS=2` to run in parallel or `TIMEOUT_SCALE=2` to allow more time under load; both values must be positive integers. `tools/ci/ci.yml` is a proposed CI configuration, **not active CI**. Run the suites individually when debugging, otherwise prefer the runner. Its own Python regression tests run with `python3 -m unittest discover -s tests -p test_runner.py -v`.
 
 Run from the repository root with a Godot executable on your PATH (or substitute its absolute path):
 
 ```sh
 godot --headless --path . -s res://tests/_check.gd
+godot --headless --path . -s res://tests/city_integration_test.gd
 godot --headless --path . -s res://tests/improvements_test.gd
 godot --headless --path . -s res://tests/rogue_test.gd
 godot --headless --path . -s res://tests/ops_ui_test.gd
@@ -113,6 +122,8 @@ godot --headless --path . -s res://tests/determinism_test.gd -- --verbose
 godot --headless --path . -s res://tests/op_test.gd -- --weeks=40 --chief=sensible --rogue
 godot --headless --path . -s res://tests/godot472_test.gd
 ```
+
+A determinism run fails for changed, missing **or new** fixture cases. The official city integration intentionally changes campaign scenarios: compare the case names, outcomes and diffs before regenerating with `godot --headless --path . -s res://tests/determinism_test.gd -- --write`. Never use `--write` merely to make an unexplained failure disappear.
 
 `tests/godot472_test.gd` is the Godot 4.7.2 compatibility regression: it feeds
 the save path deliberately malformed-but-parseable data, checks the navigator's
@@ -140,7 +151,8 @@ Some harnesses accept additional options documented in their script headers. Hea
 
 - `scripts/main.gd`: application flow, operation playback, replay, and cutscene integration.
 - `scripts/ui/ops_ui.gd`: board, planner, debrief, IA, and first-operation guide.
-- `scripts/campaign/`: situations, planning, public-intel readiness, outcomes, department, politics, and saves.
+- `scripts/campaign/`: city adapter, situations, planning, public-intel readiness, outcomes, department, politics, and saves.
+- `scripts/ui/city_map.gd`: city overview and canonical board pins.
 - `scripts/sim/`: deterministic world, operators, navigation, combat, recorder, and pacing classifiers.
 - `scripts/view/`: plan, actors, overlays, decals, replay, and presentation settings.
 - `tests/`: engine-backed unit, regression, determinism, balance, and soak harnesses.

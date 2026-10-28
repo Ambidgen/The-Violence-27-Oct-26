@@ -20,6 +20,7 @@ const StoryArchive = preload("res://scripts/campaign/story_archive.gd")
 const Settings = preload("res://scripts/ui/settings.gd")
 const Risk = preload("res://scripts/campaign/risk.gd")
 const Rogue = preload("res://scripts/campaign/rogue.gd")
+const CityMap = preload("res://scripts/ui/city_map.gd")
 const PANEL_W := 460.0
 const INK := Color("#141313")
 const GREY := Color("#6e675c")
@@ -27,6 +28,7 @@ const OBJ_KINDS := ["clear", "arrest", "rescue", "contain", "post", "patrol"]
 
 var main
 var root: PanelContainer
+var city_map
 var _scroll: ScrollContainer
 var box: VBoxContainer
 var mode := ""
@@ -48,6 +50,12 @@ var guide_dismissed := false
 
 func build(m) -> void:
 	main = m
+	city_map = CityMap.new()
+	city_map.set_anchors_preset(Control.PRESET_FULL_RECT)
+	city_map.offset_right = -PANEL_W
+	city_map.mouse_filter = Control.MOUSE_FILTER_STOP
+	city_map.visible = false
+	add_child(city_map)
 	root = PanelContainer.new()
 	root.theme = UI.make_theme()
 	root.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
@@ -65,10 +73,12 @@ func build(m) -> void:
 
 func hide_all() -> void:
 	root.visible = false
+	city_map.visible = false
 	mode = ""
 
 
 func _clear() -> void:
+	city_map.visible = false
 	for c in box.get_children():
 		c.queue_free()
 	_scroll.scroll_horizontal = 0
@@ -162,6 +172,12 @@ static func dots(n: int) -> String:
 
 
 # ================================================================== the board
+static func _ward_label(s: Dictionary) -> String:
+	if s.get("city_error", false):
+		return "ward unavailable"
+	return "%s ward (trust %d)" % [s.get("ward", "Unknown"), int(s.get("trust", 0))]
+
+
 func show_board(lines := []) -> void:
 	if mode == "debrief":
 		guide_active = false
@@ -175,6 +191,7 @@ func show_board(lines := []) -> void:
 	if c.over():
 		_election_night(lines)
 		return
+	city_map.show_city(c.board, c.politics.trust, c.week())
 	_title("THE CAMPAIGN FILE  ·  week %d of %d" % [c.week(), c.WEEKS])
 	var fit: int = d.available().size()
 	var out: int = d.officers.filter(func(r): return r["status"] == "injured").size()
@@ -197,21 +214,25 @@ func show_board(lines := []) -> void:
 	_front_page(box, c.politics, c.week() - 1 if c.week() > 1 else 1)
 	for ln in lines:
 		_text(box, String(ln), INK, 11)
-	for s in c.board:
+	for i in c.board.size():
+		var s: Dictionary = c.board[i]
 		var v := _card(box)
 		var t := Label.new()
-		t.text = s["title"]
+		t.text = "%d  ·  %s" % [i + 1, s["title"]]
 		t.add_theme_font_size_override("font_size", 14)
 		t.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		v.add_child(t)
+		if s.has("site_name"):
+			_text(v, "%s  ·  %s" % [s["site_name"], s["address"]], GREY, 11)
+		elif s.get("city_error", false):
+			_text(v, "City data unavailable: this call has no mapped location.", GREY, 11)
 		_text(
 			v,
 			(
-				"%s  ·  %s ward (trust %d)  ·  visibility %s  ·  pressure: %s"
+				"%s  ·  %s  ·  visibility %s  ·  pressure: %s"
 				% [
 					Situations.TYPES[s["type"]]["name"],
-					s["ward"],
-					int(s["trust"]),
+					_ward_label(s),
 					dots(int(s["visibility"])),
 					String(s["pressure"])
 				]
@@ -1616,7 +1637,7 @@ func _cases() -> void:
 			INK,
 			11
 		)
-		var severity := Department.CASE_ORDER.find(c.get("kind", ""))
+		var severity: int = Department.CASE_ORDER.find(c.get("kind", ""))
 		var badges: Array = []
 		if severity >= 0 and severity <= 1:
 			badges.append("GRAVE")
@@ -1832,24 +1853,32 @@ func _tab(i: int) -> void:
 func _briefing(s: Dictionary) -> void:
 	var spec: Dictionary = Situations.TYPES[s["type"]]
 	_text(box, spec["blurb"], INK, 12)
-	_text(
-		box,
-		(
-			"%s, %s ward. Trust in police: %d of 100%s."
-			% [
-				s["address"],
-				s["ward"],
-				int(s["trust"]),
-				(
-					" (the coalition has cut off community tips)"
-					if not bool(s.get("community", true))
-					else ""
-				)
-			]
-		),
-		GREY,
-		11
-	)
+	_text(box, "Suggested plans use the officers' current equipment. Issue or change kit on the Force tab.", GREY, 11)
+	if s.has("site_name"):
+		_text(box, "%s  ·  %s. The tactical layout is a schematic proxy, not a surveyed floor plan." % [s["site_name"], s.get("site_archetype", "site")], GREY, 11)
+	elif s.get("city_error", false):
+		_text(box, "City data unavailable: no verified site or ward for this call.", GREY, 11)
+	if s.get("city_error", false):
+		_text(box, "Location and ward trust are unavailable; no local community group can be identified.", GREY, 11)
+	else:
+		_text(
+			box,
+			(
+				"%s, %s ward. Trust in police: %d of 100%s."
+				% [
+					s["address"],
+					s["ward"],
+					int(s["trust"]),
+					(
+						" (the coalition has cut off community tips)"
+						if not bool(s.get("community", true))
+						else ""
+					)
+				]
+			),
+			GREY,
+			11
+		)
 	_text(
 		box,
 		(

@@ -1,9 +1,14 @@
-import json, copy, validate_city as V
+import json, copy, os, sys, tempfile, validate_city as V
 D=json.load(open('city.json'))
 def run(name, fn):
-    d=copy.deepcopy(D); fn(d); json.dump(d,open('/tmp/mut.json','w'))
-    rep=V.validate('/tmp/mut.json'); fails=[c['id'] for c in rep['checks'] if not c['ok']]
-    print(f"{name:55s} -> {fails}")
+    d=copy.deepcopy(D); fn(d)
+    with tempfile.TemporaryDirectory(prefix="port-carrick-mutation-") as tmp:
+        path=os.path.join(tmp, "city.json")
+        with open(path, "w") as f: json.dump(d, f)
+        rep=V.validate(path)
+    fails=[c['id'] for c in rep['checks'] if not c['ok']]
+    print(f"{'CAUGHT' if fails else 'MISSED'} {name:55s} -> {fails}")
+    return bool(fails)
 B=lambda d:d['buildings']
 def m1(d): B(d)['x'][500],B(d)['y'][500]=0.0,0.0
 def m2(d): d['landmarks'][0]['num']+=2; 
@@ -17,5 +22,8 @@ def m8(d): d['streets'].append(dict(id=len(d['streets']),name='Ghost Road',cls='
 def m9(d): B(d)['x'][700]=B(d)['x'][701]; B(d)['y'][700]=B(d)['y'][701]
 def m10(d):
     i=next(i for i,v in enumerate(d['buildings']['now']) if v>0); d['buildings']['status'][i]=1
+results=[]
 for n,f in [('building teleported into the river',m1),('landmark address number edited',m2),('one extra resident',m3),('building address number changed',m4),('two streets share a name',m5),('building 40 storeys',m6),('site re-pointed to the wrong building',m7),('street laid across the river',m8),('two buildings stacked on each other',m9),('occupied building flagged derelict',m10)]:
-    run(n,f)
+    results.append(run(n,f))
+print(f"{sum(results)} of {len(results)} caught")
+sys.exit(0 if all(results) else 1)

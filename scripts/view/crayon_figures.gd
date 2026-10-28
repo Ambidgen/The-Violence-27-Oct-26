@@ -14,6 +14,15 @@ const LOOK := {
 	"a": [Color("#2f4a86"), Color("#1a2a52"), Color("#1d2c55")],       # police: navy, a shade bright to read at night
 	"pd": [Color("#2f4a86"), Color("#1a2a52"), Color("#1d2c55")],
 	"qrf": [Color("#1e2433"), Color("#0f121a"), Color("#141313")],
+	# Colours of the separately authored character sprites; the rig's live limbs match.
+	"patrol": [Color("#304d84"), Color("#1a294a"), Color("#202f56")],
+	"swat": [Color("#343e4b"), Color("#1b222b"), Color("#262e36")],
+	"riot": [Color("#2b4265"), Color("#19283d"), Color("#1f3049")],
+	"hood": [Color("#866047"), Color("#4d392e"), Color("#372b25")],
+	"leather": [Color("#694b42"), Color("#392b29"), Color("#211e1d")],
+	"workcoat": [Color("#6d704e"), Color("#393f2c"), Color("#514232")],
+	"track": [Color("#526963"), Color("#30433f"), Color("#302823")],
+	"vestlook": [Color("#796f5d"), Color("#393b37"), Color("#272521")],
 	"b": [Color("#6b5a34"), Color("#3e331c"), Color("#2a1d14")],       # suspects: olive-umber
 	"c": [Color("#e4dccb"), Color("#a59b88"), Color("#4a3426")],       # civilians: pale (tinted live)
 	"med": [Color("#e4dccb"), Color("#a59b88"), Color("#4a3426")],

@@ -8,11 +8,14 @@ const UI = preload("res://scripts/ui/ui.gd")
 const Ink = preload("res://scripts/view/ink.gd")
 const Settings = preload("res://scripts/ui/settings.gd")
 const Campaign = preload("res://scripts/campaign/campaign.gd")
+const SaveFile = preload("res://scripts/campaign/save_file.gd")
 const Version = preload("res://scripts/version.gd")
 
 const VERSION := Version.VALUE
 
 var main
+# Kept separate for UI tests; in the game this is the campaign's single save slot.
+var _campaign_save_path := Campaign.SAVE_PATH
 var shade: ColorRect
 var root: Control
 var screen := ""
@@ -137,6 +140,8 @@ func show_title() -> void:
 	var c: Dictionary = _campaign_summary()
 	if c.get("exists", false):
 		_menu_btn(v, "Continue run    ·    %s" % c["text"], func(): _continue())
+	elif c.get("unreadable", false):
+		_label(v, "Saved campaign could not be loaded. It may be damaged or from a newer version.", 13, Ink.INK, true, 360.0)
 	_menu_btn(v, "New run", func(): _new_campaign_ask())
 	_menu_btn(v, "Test range", func(): _test_range())
 	if main.cutscene != null and main.cutscene.available():
@@ -149,8 +154,10 @@ func show_title() -> void:
 
 func _campaign_summary() -> Dictionary:
 	var c = main.campaign
-	if c == null or not load("res://scripts/campaign/save_file.gd").exists(Campaign.SAVE_PATH):
+	if c == null or not SaveFile.exists(_campaign_save_path):
 		return {}
+	if main._placeholder:
+		return {"unreadable": true}
 	if c.over():
 		return {"exists": true, "text": "election night · the file is closed"}
 	return {"exists": true, "text": "week %d of %d, %d officers fit, account $%s" % [c.week(), c.WEEKS, c.dept.available().size(), c.dept.money(c.dept.balance)]}
@@ -163,12 +170,15 @@ func _continue() -> void:
 
 func _new_campaign_ask() -> void:
 	var c: Dictionary = _campaign_summary()
-	if not c.get("exists", false) or main.campaign.over():
+	if c.is_empty() or (c.get("exists", false) and main.campaign.over()):
 		_new_campaign()
 		return
 	screen = "confirm_new"
 	var v := _page("A new story", 620.0)
-	_label(v, "The current file (%s) has one save. Starting over replaces it." % c["text"], 14, Ink.INK, true)
+	if c.get("unreadable", false):
+		_label(v, "The existing save could not be loaded. Starting over may replace it; keep a copy first if you want to recover it.", 14, Ink.INK, true)
+	else:
+		_label(v, "The current file (%s) has one save. Starting over replaces it." % c["text"], 14, Ink.INK, true)
 	var h := HBoxContainer.new()
 	h.add_theme_constant_override("separation", 10)
 	v.add_child(h)

@@ -89,8 +89,9 @@ func start(seed_v: int) -> void:
 
 # ================================================================== reading it
 func share(c: String) -> float:
-	# An unknown id must read as 0, not raise: callers include the story archive,
-	# whose ids are not the candidate ids.
+	# An unknown id must read as 0, not a phantom candidate's share.
+	if not CAND_ORDER.has(c):
+		return 0.0
 	var tot := 0.0
 	for k in CAND_ORDER:
 		tot += maxf(1.0, float(polls.get(k, 0.0)))
@@ -98,7 +99,7 @@ func share(c: String) -> float:
 
 
 func leader() -> String:
-	var best := CAND_ORDER[0]
+	var best: String = CAND_ORDER[0]
 	for c in CAND_ORDER:
 		if share(c) > share(best):
 			best = c
@@ -312,8 +313,9 @@ func on_operation(week: int, sit: Dictionary, res: Dictionary, w, dept) -> Array
 		_poll("okonjo", 3.0 * crowd_killed)
 		_poll("kettering", 2.0 * crowd_killed)
 		_poll("pell", -3.0)
-		_trust(2, -8)
-		_headline(week, "%s KILLED AT CIVIC PLAZA RALLY" % _num(crowd_killed).to_upper(), "The rally was over before the ambulances left. Pell calls for a review; Okonjo-Vale asks who signed the plan.", "op")
+		_trust(wi, -8)
+		var place := String(sit.get("site_name", "public event")).to_upper()
+		_headline(week, "%s KILLED AT %s" % [_num(crowd_killed).to_upper(), place], "The rally was over before the ambulances left. Pell calls for a review; Okonjo-Vale asks who signed the plan.", "op")
 	# what was done to civilians by police: the story is coming, sooner or later
 	if civ_hit + civ_killed + excessive > 0:
 		var p_never := 0.0
@@ -557,13 +559,13 @@ func _front_page(week: int) -> void:
 		_headline(week, lines_c[ld][0], lines_c[ld][1], "politics")
 		have += 1
 	var filler := [
-		["UNION STREET REPAIR CREW RETURNS TO THE SAME POTHOLE", "One lane is closed. The city says a steel plate will arrive Thursday."],
+		["UNIONTOWN AVENUE REPAIR CREW RETURNS TO THE SAME POTHOLE", "One lane is closed. The city says a steel plate will arrive Thursday."],
 		["IRONWORKS PLANT CLOSURE: 300 SHIFTS CUT", "Workers left through the east gate with their lockers in boxes."],
-		["HARBOUR BRIDGE INSPECTION DELAYED AGAIN", "The weight limit remains in force. The detour adds twenty minutes."],
+		["FERRY STREET LIFT BRIDGE INSPECTION DELAYED AGAIN", "The weight limit remains in force. The detour adds twenty minutes."],
 		["CITY HALL ELEVATOR STUCK; PELL TAKES THE STAIRS", "His office logged the climb as a facilities issue."],
 		["CARRICK LEDGER CUTS FOUR REPORTERS", "The city desk will cover council and courts with one fewer person."],
 		["NORTHGATE BAKERY WINS REGIONAL PRIZE FOR RYE", "The owner says the ovens are older than the lease."],
-		["WATER MAIN BURSTS UNDER STATION ROAD", "Crews have closed the block. Repairs may run into next week."],
+		["WATER MAIN BURSTS UNDER FOUNDRY ROAD", "Crews have closed the block. Repairs may run into next week."],
 		["SCHOOL BOARD VOTES TO MERGE TWO MORE SCHOOLS", "Families ask which bus will take their children to the new site."],
 	]
 	while have < 3:
@@ -583,7 +585,7 @@ func hold_election(dept) -> Array:
 	for c in CAND_ORDER:
 		final[c] = maxf(1.0, final[c])
 		tot += final[c]
-	var win := CAND_ORDER[0]
+	var win: String = CAND_ORDER[0]
 	for c in CAND_ORDER:
 		final[c] = 100.0 * final[c] / tot
 		if final[c] > final[win]:
@@ -659,7 +661,7 @@ func from_data(d: Dictionary, seed_v: int) -> void:
 		return
 	var raw_trust: Array = d.get("trust", []) if d.get("trust", []) is Array else []
 	trust = []
-	for v in raw_trust:
+	for v in raw_trust.slice(0, Situations.WARDS.size()):
 		trust.append(clampi(_int_of(v), 0, 100))
 	# a short ward list would leave `_trust()` and the City Hall screen indexing nothing
 	while trust.size() < Situations.WARDS.size():

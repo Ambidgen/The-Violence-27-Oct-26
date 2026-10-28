@@ -120,6 +120,8 @@ func _init() -> void:
 		c3.end_week()
 		guard += 1
 	_check(c3.over() and c3.board.is_empty() and c3.politics.result.has("winner"), "the election is held after week 40 (%d weeks) and %s wins" % [guard, Politics.CANDIDATES[c3.politics.result["winner"]]["name"]])
+	var after_election := JSON.stringify(c3.to_data())
+	check_election_noop(c3, after_election)
 	_check(not c3.politics.result["ending"]["lines"].is_empty(), "with an ending: %s" % c3.politics.result["ending"]["head"])
 	# every candidate can win, and each ending reads the record
 	for cand in Politics.CAND_ORDER:
@@ -209,3 +211,11 @@ func _init() -> void:
 	_check(c6.from_data(old) and c6.politics.trust.size() == Situations.WARDS.size(), "a v0.8 save loads; the city starts from the wards' trust")
 	print("problems: %d" % problems)
 	quit(1 if problems > 0 else 0)
+
+
+func check_election_noop(c, before: String) -> void:
+	_check(c.end_week().is_empty() and JSON.stringify(c.to_data()) == before, "ending an already finished campaign does not advance time or pay again")
+	_check(c.politics.share("not-a-candidate") == 0.0, "an unknown candidate has no phantom poll share")
+	var p = Politics.new()
+	p.from_data({"trust": [1, 2, 3, 4, 5, 6, 99]}, 5)
+	_check(p.trust.size() == Situations.WARDS.size() and p.avg_trust() == 3.5, "extra saved trust entries cannot distort the six-ward average")

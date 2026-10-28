@@ -7,6 +7,7 @@
 # keeps a log per suite, and exits non-zero if any suite fails.
 #
 #   tools/run_tests.sh --check          compile only (fastest possible signal)
+#   tools/run_tests.sh --range          tactical test-range regressions, no campaign playtests
 #   tools/run_tests.sh --quick          the gates a commit should pass (default)
 #   tools/run_tests.sh --full           quick + the simulation/campaign suites
 #   tools/run_tests.sh --soak           full + the asserted balance matrix
@@ -36,7 +37,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 2
 ROOT="$PWD"
-LOGS="$ROOT/build/test-logs"
+LOGS="${TEST_LOG_DIR:-$ROOT/build/test-logs}"
 GODOT="${GODOT:-godot}"
 TIER="quick"
 TIMEOUT_SCALE="${TIMEOUT_SCALE:-1}"
@@ -46,8 +47,15 @@ usage() {
 	sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 }
 
+# Reject bad scaling/concurrency instead of silently turning a timeout into 0.
+if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || ! [[ "$TIMEOUT_SCALE" =~ ^[1-9][0-9]*$ ]]; then
+	echo "run_tests: JOBS and TIMEOUT_SCALE must be positive integers" >&2
+	exit 2
+fi
+
 case "${1:---quick}" in
 	--check) TIER="check" ;;
+	--range) TIER="range" ;;
 	--quick) TIER="quick" ;;
 	--full) TIER="full" ;;
 	--soak) TIER="soak" ;;
@@ -68,10 +76,16 @@ fi
 # name|tier|timeout seconds|how failures are detected|arguments
 #   exit = trust the exit code only
 #   scan = exit code, and FAIL/FAILED text in the log, and "failures" above 0
-#   note = report only: never fails the run (probes, profiles, galleries)
+#   note = report only for ordinary exits (probes, profiles, galleries); a timeout still fails
 PLAN=$(cat <<'EOF'
 _check.gd|check|300|scan|
 godot472_test.gd|quick|300|exit|
+city_integration_test.gd|quick|300|exit|
+character_assets_test.gd|quick|300|exit|
+test_range_mechanics_test.gd|quick|300|exit|
+test_range_regression_test.gd|quick|300|exit|
+test_range_replays_test.gd|quick|600|exit|
+test_range_determinism_test.gd|quick|900|exit|
 improvements_test.gd|quick|600|exit|
 ops_ui_test.gd|quick|600|exit|
 dept_test.gd|quick|600|exit|
@@ -108,7 +122,7 @@ want() {
 		check) [ "$1" = "check" ] ;;
 		quick) [ "$1" = "check" ] || [ "$1" = "quick" ] ;;
 		full) [ "$1" = "check" ] || [ "$1" = "quick" ] || [ "$1" = "full" ] ;;
-		soak) true ;;
+		soak|list) true ;;
 	esac
 }
 
@@ -117,7 +131,15 @@ selected=()
 while IFS='|' read -r name tier budget detect args; do
 	[ -z "$name" ] && continue
 	[ -f "tests/$name" ] || { echo "run_tests: tests/$name is in the plan but not in the tree" >&2; exit 2; }
-	want "$tier" && selected+=("$name|$tier|$budget|$detect|$args")
+	if [ "$TIER" = "range" ]; then
+		# Deliberately exclude campaign scenarios and campaign determinism cases.
+		case "$name" in
+			_check.gd|test_range_mechanics_test.gd|test_range_regression_test.gd|test_range_replays_test.gd|test_range_determinism_test.gd|habits_test.gd|maps_test.gd|nav_door_test.gd)
+				selected+=("$name|$tier|$budget|$detect|$args") ;;
+		esac
+	elif want "$tier"; then
+		selected+=("$name|$tier|$budget|$detect|$args")
+	fi
 done <<< "$PLAN"
 
 if [ "${#selected[@]}" -eq 0 ]; then
@@ -152,6 +174,7 @@ run_one() {
 	local name tier budget detect args
 	IFS='|' read -r name tier budget detect args <<< "$row"
 	local log="$LOGS/${name%.gd}.log"
+	local status_file="$LOGS/${name%.gd}.status"
 	local seconds=$(( budget * TIMEOUT_SCALE ))
 	# shellcheck disable=SC2086
 	local -a extra=()
@@ -180,6 +203,9 @@ run_one() {
 			;;
 	esac
 	if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then status="TIMEOUT"; fi
+	# A harness may quit(0) after a script or engine/resource error.
+	if [ "$detect" != "note" ] && [ "$status" = "PASS" ] && grep -qE 'SCRIPT ERROR|Parse Error|^ERROR:' "$log"; then status="FAIL"; fi
+	printf '%s\n' "$status" > "$status_file"
 
 	case "$status" in
 		PASS) pass=$((pass+1)); printf '  %sPASS%s    %-28s %4ss\n' "$C_PASS" "$C_OFF" "${name%.gd}" "$took" ;;
@@ -189,33 +215,32 @@ run_one() {
 	esac
 	# keep the interesting part of a failure in front of the reader
 	if [ "$status" = "FAIL" ]; then
-		grep -nE '\bFAILED\b|\bFAIL\b|failures?: *[1-9]|problems?: *[1-9]|SCRIPT ERROR|Parse Error' "$log" | head -5 | sed 's/^/          /'
+		grep -nE '\bFAILED\b|\bFAIL\b|failures?: *[1-9]|problems?: *[1-9]|SCRIPT ERROR|Parse Error|^ERROR:' "$log" | head -5 | sed 's/^/          /'
 	fi
 }
 
 export -f run_one 2>/dev/null || true
-export GODOT LOGS TIMEOUT_SCALE
+export GODOT LOGS TIMEOUT_SCALE C_PASS C_FAIL C_NOTE C_OFF
 
 if [ "$JOBS" -gt 1 ]; then
-	# Suites are independent processes; on a many-core machine this is the
-	# difference between a coffee and a lunch. Not the default: several suites
-	# are CPU-bound and compete badly on two cores.
+	# Clear only selected status files: stale logs from an earlier tier must not
+	# turn a crashed child into a pass. Each child records its own final status.
+	for row in "${selected[@]}"; do
+		IFS='|' read -r name tier budget detect args <<< "$row"
+		rm -f "$LOGS/${name%.gd}.status"
+	done
 	printf '%s\n' "${selected[@]}" | xargs -P "$JOBS" -I{} bash -c 'run_one "$@"' _ {}
-	# xargs cannot feed the counters back, so the parallel path re-derives them
 	pass=0; fail=0; timeout_n=0; noted=0; failed_names=()
-	for f in "$LOGS"/*.log; do
-		base=$(basename "$f" .log)
-		row=$(printf '%s\n' "${selected[@]}" | grep -m1 "^${base}.gd|")
-		[ -z "$row" ] && continue
-		detect=$(echo "$row" | cut -d'|' -f4)
-		case "$detect" in
-			note) noted=$((noted+1)); continue ;;
+	for row in "${selected[@]}"; do
+		IFS='|' read -r name tier budget detect args <<< "$row"
+		status_file="$LOGS/${name%.gd}.status"
+		status=$(cat "$status_file" 2>/dev/null || printf 'FAIL')
+		case "$status" in
+			PASS) pass=$((pass+1)) ;;
+			NOTE) noted=$((noted+1)) ;;
+			TIMEOUT) timeout_n=$((timeout_n+1)); failed_names+=("$name (timeout)") ;;
+			*) fail=$((fail+1)); failed_names+=("$name") ;;
 		esac
-		if grep -qE '\bFAILED\b|\bFAIL\b|failures?: *[1-9]|problems?: *[1-9]' "$f"; then
-			fail=$((fail+1)); failed_names+=("$base")
-		else
-			pass=$((pass+1))
-		fi
 	done
 else
 	for row in "${selected[@]}"; do
@@ -230,6 +255,7 @@ printf 'suites: %d   pass: %d   fail: %d   timeout: %d   note: %d\n' \
 if [ "$fail" -ne 0 ] || [ "$timeout_n" -ne 0 ]; then
 	echo "failed: ${failed_names[*]}"
 	echo "logs are in $LOGS"
+	if [ "$timeout_n" -ne 0 ]; then exit 3; fi
 	exit 1
 fi
 echo "all selected suites passed"

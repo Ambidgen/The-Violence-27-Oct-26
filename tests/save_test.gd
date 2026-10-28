@@ -39,5 +39,26 @@ func _init() -> void:
 	check(Campaign.load_from(PATH) != null and SaveFile.exists(PATH), "a missing save with a backup still loads")
 	SaveFile.erase(PATH)
 	check(Campaign.load_from(PATH) == null and not SaveFile.exists(PATH), "erase removes everything")
+
+	# A valid JSON object is not necessarily a usable campaign. Recover from the
+	# backup without rotating the broken primary over that known-good backup.
+	check(c.save(PATH), "recovery fixture primary writes")
+	c.dept.balance += 500
+	check(c.save(PATH), "recovery fixture backup writes")
+	var original_backup := FileAccess.get_file_as_string(PATH + ".bak")
+	var bad := FileAccess.open(PATH, FileAccess.WRITE)
+	bad.store_string(JSON.stringify({"version": Campaign.VERSION, "seed": 3}))
+	bad.close()
+	var recovered = Campaign.load_from(PATH)
+	check(recovered != null and recovered.dept.balance == c.dept.balance - 500, "a parseable but invalid primary falls back to the backup")
+	if recovered != null:
+		check(recovered.save(PATH) and FileAccess.get_file_as_string(PATH + ".bak") == original_backup, "the first recovery save preserves the good backup")
+	# A future-format primary must not be silently replaced by yesterday's file.
+	var newer := FileAccess.open(PATH, FileAccess.WRITE)
+	newer.store_string(JSON.stringify({"version": Campaign.VERSION + 1}))
+	newer.close()
+	check(Campaign.load_from(PATH) == null and FileAccess.get_file_as_string(PATH + ".bak") == original_backup,
+		"a future-version primary is refused even when an older backup exists")
+	SaveFile.erase(PATH)
 	print("save_test: %s" % ("PASS" if fails == 0 else "%d FAILED" % fails))
 	quit(1 if fails > 0 else 0)

@@ -26,6 +26,13 @@ var rng := RandomNumberGenerator.new()
 var seed_used := 0
 var events: Array = []
 var keep_events := true
+# Optional, test-oriented decision telemetry. Separate from UI/recorder events;
+# it never draws randomness or feeds back into simulation decisions.
+var diagnostics_enabled := false
+var diagnostics: Array = []
+var diagnostic_counts := {}
+var diagnostics_dropped := 0
+const DIAGNOSTIC_LIMIT := 50000
 var log_lines: Array = []
 var log_base := 0              # lines dropped from the front of log_lines
 var log_kinds := {}            # when not empty, only these kinds are logged
@@ -239,6 +246,9 @@ func setup_empty(lv, nv, seed_val: int, facs: Array) -> void:
 
 
 func _base(lv, nv, seed_val: int) -> void:
+	diagnostics.clear()
+	diagnostic_counts.clear()
+	diagnostics_dropped = 0
 	level = lv
 	geom = lv.geom
 	nav = nv
@@ -294,6 +304,9 @@ func _attach(o) -> void:
 		o.judges = factions[o.faction].get("judges", false)
 	if not o.ech.has("form") and (not o.civ or o.attacker):
 		o.ech = Habits.vary(o.ech, rng)
+		# reset() ran before the varied resistance was known; initialize the
+		# accumulator's baseline with the actual per-operator resistance.
+		o.habit_stress = Habits.habit_stress_gain(o.stress, float(o.ech.get("resist", 0.0)))
 	if o.civ and o.persona.is_empty():
 		o.persona = CivBrain.roll_persona(rng)
 	o.room = level.room_at(o.pos)
@@ -540,6 +553,23 @@ func emit(ev: Dictionary) -> void:
 		events.append(ev)
 	if recorder != null:
 		recorder.on_event(ev)
+
+
+## Callers report decisions/transitions, not samples. A bounded buffer prevents a
+## long simulation from growing without limit; totals and dropped count remain visible.
+func diagnose(kind: String, o, detail := {}) -> void:
+	if not diagnostics_enabled:
+		return
+	diagnostic_counts[kind] = int(diagnostic_counts.get(kind, 0)) + 1
+	if diagnostics.size() >= DIAGNOSTIC_LIMIT:
+		diagnostics_dropped += 1
+		return
+	var ev: Dictionary = detail.duplicate()
+	ev["kind"] = kind
+	ev["t"] = t
+	ev["id"] = o.id
+	ev["team"] = o.team
+	diagnostics.append(ev)
 
 
 func op_by_id(oid: String):
@@ -855,7 +885,7 @@ func wake(o) -> void:
 
 # ================================================================== bad habits
 func _update_bad(o, first: bool) -> void:
-	var eff: float = o.stress * (1.0 - o.ech["resist"])
+	var eff: float = o.habit_stress
 	# hold-mode habits (v0.7) count only while the squad holds: a change of posture
 	# forces a recount
 	var hold_now: bool = o.holding
@@ -878,11 +908,13 @@ func _update_bad(o, first: bool) -> void:
 			if on:
 				o.active_bad.erase(bid)
 				changed = true
+				diagnose("habit_transition", o, {"habit": bid, "active": false, "reason": "not_present_or_hold_gate", "effective_stress": eff})
 			continue
 		if b["kind"] == "trait":
 			if not on:
 				o.active_bad[bid] = true
 				changed = true
+				diagnose("habit_transition", o, {"habit": bid, "active": true, "reason": "trait", "effective_stress": eff})
 				if first and not quiet:
 					say("%s %s %s (%s): %s suspended" % [o.id, bid, b["name"], b["trait"], _list_owned(o, b["over"])], "bad")
 			continue
@@ -891,12 +923,14 @@ func _update_bad(o, first: bool) -> void:
 			o.active_bad.erase(bid)
 			on = false
 			changed = true
+			diagnose("habit_transition", o, {"habit": bid, "active": false, "reason": "stress", "effective_stress": eff, "threshold": thr})
 			if not quiet:
 				say("%s %s %s eases" % [o.id, bid, b["name"]], "bad")
 		elif not on and eff >= thr:
 			o.active_bad[bid] = true
 			on = true
 			changed = true
+			diagnose("habit_transition", o, {"habit": bid, "active": true, "reason": "stress", "effective_stress": eff, "threshold": thr})
 			if not quiet:
 				say("%s %s %s: %s suspended" % [o.id, bid, b["name"], _list_owned(o, b["over"])], "bad")
 			emit({"type": "bad_on", "id": o.id, "bad": bid, "name": b["name"]})
@@ -1904,6 +1938,7 @@ func _gas_tick() -> void:
 		var first: bool = not x.gassed(t)
 		x.ticker["gassed_until"] = t + 6.0
 		x.stress = minf(1.0, x.stress + 0.03)
+		add_habit_stress(x, 0.03)
 		if not first:
 			continue
 		# the first breath: eyes shut, doubled over coughing
@@ -2385,15 +2420,19 @@ func _start_acquire(o, e, zone: String) -> void:
 
 func _aim_update(o) -> void:
 	if o.aim.is_empty():
+		_lane_clear(o)
 		return
 	if o.stunned(t):
+		_lane_clear(o)
 		o.aim = {}
 		return
 	if o.aim["want_t"] < t - 0.05:
+		_lane_clear(o)
 		o.aim = {}
 		return
 	var e = op_by_id(o.aim["tid"])
 	if e == null:
+		_lane_clear(o)
 		o.aim = {}
 		return
 	o.weapon_up = true
@@ -2419,8 +2458,10 @@ func _aim_update(o) -> void:
 		o.aim["pause"] -= DT
 		return
 	if not o.aim["fire"] or not o.action.is_empty():
+		_lane_clear(o)
 		return
 	if o.ticker.get("flinch_until", -1.0) > t or o.ticker.get("stagger_until", -1.0) > t:
+		_lane_clear(o)
 		return
 	var s: Dictionary = o.ws()
 	if s["mag"] <= 0 or s["jam"] or s["lost"]:
@@ -2441,29 +2482,22 @@ func _aim_update(o) -> void:
 		release = sigma_shooter(o, o.aim["settle"]) <= 0.35 * W or o.aim["settle"] >= cap
 	if since < split or not release:
 		return
-	# HD11 lift and shift (hold): no fire while a teammate is in the lane, and half a
-	# second more once they are clear
-	if o.holding and o.has("HD11"):
-		if friend_in_line(o, e.pos):
-			o.ticker["lift_until"] = t + 0.5
-			return
-		if t < o.ticker.get("lift_until", -1.0):
-			return
-	# the instinct everyone has (v0.9.1): nobody fires through the back of a friend squarely
-	# in front of them; police are taught what lies beyond too. WD10 widens the lane and
-	# steps aside; a defender firing through the counter (BH26) does neither.
-	if not o.has("WD10") and not o.hb("BH26") and friend_in_line(o, e.pos, 0.3, 4.0 if o.judges else 0.0):
+	# HD11 still waits half a second after its wider hold lane clears. The instinctive
+	# lane is narrower without WD10 and includes the police beyond-target check. BH26
+	# intentionally suspends these habits and can fire through a teammate.
+	var lift: bool = o.holding and o.has("HD11")
+	var lift_blocked: bool = lift and friend_in_line(o, e.pos, 0.5)
+	var width := 0.5 if o.has("WD10") else 0.3
+	var beyond := 4.0 if o.judges else 0.0
+	var instinct_blocked: bool = (o.has("WD10") or not o.hb("BH26")) and friend_in_line(o, e.pos, width, beyond)
+	if lift_blocked:
+		o.ticker["lift_until"] = t + 0.5
+	if lift_blocked or instinct_blocked:
 		o.aim["held_t"] = t
+		_lane_hold(o, e, 0.5 if lift_blocked else width, beyond if instinct_blocked else 0.0)
 		return
-	if o.has("WD10") and friend_in_line(o, e.pos, 0.5, 4.0 if o.judges else 0.0):
-		o.aim["held_t"] = t
-		o.aim["hold"] += DT
-		if o.aim["hold"] > 0.3 and o.sidestep.is_empty() and o.action.is_empty():
-			var side := Vector2.from_angle(bearing + PI / 2.0)
-			if not nav.is_free(o.pos + side * 0.5):
-				side = -side
-			o.sidestep = {"dir": side, "left": 0.45}
-			o.aim["hold"] = 0.0
+	_lane_clear(o)
+	if lift and t < o.ticker.get("lift_until", -1.0):
 		return
 	o.aim["hold"] = 0.0
 	# a shot held for a friend in the lane is judged again when the lane clears: the man
@@ -2491,17 +2525,143 @@ func _aim_update(o) -> void:
 ## A teammate in the lane to the target: within `lateral` of the line, in front of the
 ## muzzle and short of the target (or up to `beyond` metres past it).
 func friend_in_line(o, target: Vector2, lateral := 0.5, beyond := 0.0) -> bool:
-	var u: Vector2 = (target - o.pos)
-	var L := u.length()
-	if L < 0.01:
+	return _lane_friend(o, o.pos, target, lateral, beyond) != null
+
+
+## Origin may be a proposed firing position. Search from the actual operator so the
+## spatial hash also covers friends near the proposed position. Choose the nearest
+## blocker, with a stable tie-break rather than relying on spatial-hash iteration order.
+func _lane_friend(o, origin: Vector2, target: Vector2, lateral: float, beyond: float):
+	var u: Vector2 = target - origin
+	var length := u.length()
+	if length < 0.01:
+		return null
+	u /= length
+	var best = null
+	var best_s := INF
+	for m in mates_near(o, origin.distance_to(o.pos) + length + 0.5 + beyond):
+		var rel: Vector2 = m.pos - origin
+		var along := rel.dot(u)
+		if along > 0.2 and along < length + beyond and absf(rel.cross(u)) < lateral:
+			if along < best_s or (is_equal_approx(along, best_s) and best != null and m.id < best.id):
+				best = m
+				best_s = along
+	return best
+
+
+func _lane_clear(o) -> void:
+	if o.ticker.has("lane_since"):
+		diagnose("lane_hold_end", o, {"target": o.ticker.get("lane_target", ""),
+			"seconds": maxf(0.0, t - float(o.ticker["lane_since"]))})
+	o.ticker.erase("lane_since")
+	o.ticker.erase("lane_last")
+	o.ticker.erase("lane_target")
+	o.ticker.erase("lane_retry")
+
+
+## A safe local step never crosses geometry, a closed door, another body, or ends in
+## a teammate's active firing lane. Movement is still integrated normally: no teleport.
+func _lane_step_safe(o, q: Vector2) -> bool:
+	if q.x < 0.0 or q.y < 0.0 or q.x >= level.W or q.y >= level.H:
 		return false
-	u /= L
-	for m in mates_near(o, L + 0.5 + beyond):
-		var rel: Vector2 = m.pos - o.pos
-		var s := rel.dot(u)
-		if s > 0.2 and s < L + beyond and absf(rel.cross(u)) < lateral:
-			return true
-	return false
+	if not nav.is_free(q) or not nav.line_ok(0, o.pos, q):
+		return false
+	if geom.dyn_active > 0 and geom.leaf_in_way(o.pos, q, 0.25) >= 0:
+		return false
+	for m in _near_fast(o.pos, o.pos.distance_to(q) + 0.8):
+		if m == o or not m.alive():
+			continue
+		var initial: float = o.pos.distance_to(m.pos)
+		var nearest: Vector2 = Geometry2D.get_closest_point_to_segment(m.pos, o.pos, q)
+		if nearest.distance_to(m.pos) < 0.5 and (q.distance_to(m.pos) < 0.55 or nearest.distance_to(m.pos) < initial - 0.02):
+			return false
+	return not brain._pos_in_line_of_fire(o, q, mates_near(o, 8.0))
+
+
+## Bounded recovery after a sustained hold. WD10 acts sooner and checks the wider
+## lane; everyone else waits longer. A shot is *always* checked again at release.
+## No random numbers are used, including for selecting a side or alternate target.
+func _lane_hold(o, e, width: float, beyond: float) -> void:
+	if o.ticker.get("lane_target", "") != e.id or t - float(o.ticker.get("lane_last", -99.0)) > 0.2:
+		_lane_clear(o)
+		o.ticker["lane_target"] = e.id
+		o.ticker["lane_since"] = t
+		o.ticker["lane_retry"] = t
+		diagnose("lane_hold_start", o, {"target": e.id, "width": width, "beyond": beyond, "wd10": o.has("WD10")})
+	o.ticker["lane_last"] = t
+	o.aim["hold"] = t - float(o.ticker["lane_since"])
+	var delay := 0.3 if o.has("WD10") else 1.5
+	if o.aim["hold"] < delay or t < float(o.ticker.get("lane_retry", t)) or not o.sidestep.is_empty():
+		return
+	o.ticker["lane_retry"] = t + 1.5
+	var u: Vector2 = (e.pos - o.pos).normalized()
+	if u.length_squared() < 0.5:
+		return
+	var side := Vector2(-u.y, u.x)
+	# Prefer a small, directly reachable reposition that really clears the lane.
+	for sign in [1.0, -1.0]:
+		var dir: Vector2 = side * sign
+		var q: Vector2 = o.pos + dir * 0.9
+		if _lane_step_safe(o, q) and _lane_friend(o, q, e.pos, width, beyond) == null \
+				and geom.sight_clear(q, o.eye(), e.pos, e.zone_centre(o.aim["zone"])):
+			o.sidestep = {"dir": dir, "left": 0.75}
+			diagnose("lane_recovery", o, {"target": e.id, "method": "shooter_step"})
+			return
+	# If the shooter is boxed in, a stationary, unengaged blocker may step clear.
+	# Never interrupt a fighting teammate's aim, action, movement, or incapacitation.
+	var blocker = _lane_friend(o, o.pos, e.pos, width, beyond)
+	if blocker != null and blocker.fighting() and blocker.aim.is_empty() and blocker.action.is_empty() \
+			and blocker.sidestep.is_empty() and not blocker.moving and not blocker.stunned(t):
+		for sign in [1.0, -1.0]:
+			var dir: Vector2 = side * sign
+			var q: Vector2 = blocker.pos + dir * 0.9
+			if absf((q - o.pos).cross(u)) >= width + 0.15 and _lane_step_safe(blocker, q):
+				blocker.sidestep = {"dir": dir, "left": 0.75}
+				diagnose("lane_recovery", o, {"target": e.id, "method": "blocker_step", "blocker": blocker.id})
+				return
+	# Otherwise prefer a visible, clear alternative of the same Rule-1/range class.
+	var alternative = null
+	var best_d := INF
+	for other in visible_enemies(o):
+		var d: float = o.pos.distance_to(other.pos)
+		if other == e or (d <= 10.0) != (o.pos.distance_to(e.pos) <= 10.0):
+			continue
+		if friend_in_line(o, other.pos, width, beyond):
+			continue
+		if d < best_d or (is_equal_approx(d, best_d) and alternative != null and other.id < alternative.id):
+			alternative = other
+			best_d = d
+	if alternative != null:
+		o.ticker["lane_alt"] = alternative.id
+		o.ticker["lane_alt_until"] = t + 2.0
+		diagnose("lane_recovery", o, {"target": e.id, "method": "retarget", "alternative": alternative.id})
+		return
+	# A short navigable route is a last resort. The brain follows it without firing,
+	# then reassesses the real lane. Failed or expired goals are briefly blacklisted.
+	if o.ticker.has("lane_goal"):
+		if o.ticker.get("lane_goal_target", "") == e.id and t <= float(o.ticker.get("lane_goal_until", -1.0)):
+			return
+		o.ticker.erase("lane_goal")
+	for distance in [1.8, 2.8]:
+		for sign in [1.0, -1.0]:
+			var q: Vector2 = o.pos + side * sign * distance
+			if q.x < 0.0 or q.y < 0.0 or q.x >= level.W or q.y >= level.H or not nav.is_free(q):
+				continue
+			if t < float(o.ticker.get("lane_failed_until", -1.0)) and q.distance_to(o.ticker.get("lane_failed_goal", Vector2.INF)) < 0.5:
+				continue
+			if _lane_friend(o, q, e.pos, width, beyond) != null or brain._pos_in_line_of_fire(o, q, mates_near(o, 8.0)):
+				continue
+			if not geom.sight_clear(q, o.eye(), e.pos, e.zone_centre(o.aim["zone"])):
+				continue
+			var path: PackedVector2Array = nav.find_path(0, o.pos, q, o.avoid_key)
+			if path.size() < 2 or nav.path_length(path) > 5.0 or not brain._reposition_route_safe(o, e, path):
+				continue
+			o.ticker["lane_goal"] = q
+			o.ticker["lane_goal_target"] = e.id
+			o.ticker["lane_goal_until"] = t + minf(5.0, maxf(3.0, nav.path_length(path) / 1.2 + 1.0))
+			diagnose("lane_recovery", o, {"target": e.id, "method": "route", "distance": nav.path_length(path)})
+			return
+	diagnose("lane_recovery", o, {"target": e.id, "method": "no_safe_route"})
 
 
 func fire_at(o, e, zone: String, settle: float) -> void:
@@ -2632,7 +2792,7 @@ func _fire(o, bearing: float, aim_z: float, dist: float, settle: float, tgt = nu
 	if incident != null:
 		incident.on_shot(o, tgt, hit_op, walls, endp, hit_op == null and not mh.is_empty() and mh["hit"])
 	if hit_op != null:
-		_hit(hit_op, hit_zone, minf(hit_lat, hit_zone[3] * 0.99), u, o, e_at, walls)
+		_hit(hit_op, hit_zone, minf(hit_lat, hit_zone[3] * 0.99), u, o, e_at, walls, tgt)
 	elif not mh.is_empty() and mh["hit"]:
 		emit({"type": "impact", "p": mh["p"], "n": mh["n"], "kind": mh["kind"]})
 	var pj: float = w["stop"] * (0.5 if o.has("WD04") else 1.0)
@@ -2715,8 +2875,15 @@ func in_sector(m, dir: float) -> bool:
 	return absf(angle_difference(dir, sec)) <= el["sector_half"] + deg_to_rad(20.0)
 
 
+## Update the habit accumulator even after raw stress saturates: repeated pressure
+## still matters. This helper intentionally has no alert, RNG, or stray-fire effects.
+func add_habit_stress(a, amt: float) -> void:
+	a.habit_stress = minf(1.0, a.habit_stress + Habits.habit_stress_gain(amt, float(a.ech.get("resist", 0.0))))
+
+
 func add_stress(a, amt: float, _why: String) -> void:
 	a.stress = minf(1.0, a.stress + amt)
+	add_habit_stress(a, amt)
 	a.last_stress_t = t
 	if a.alive():
 		raise_alert(a, Op.YELLOW)
@@ -2728,7 +2895,18 @@ func add_stress(a, amt: float, _why: String) -> void:
 
 
 # ================================================================== damage
-func _hit(a, zn: Array, lat: float, u: Vector2, shooter, energy := 1.0, walls := 0) -> void:
+## Short-lived observations are per shooter and per target, not shared magical
+## knowledge. A successful penetrating hit clears the streak in _hit().
+func _notice_shield_stop(shooter, target) -> void:
+	if shooter.ticker.get("shield_observed_target", "") != target.id \
+			or t - float(shooter.ticker.get("shield_observed_t", -99.0)) > 6.0:
+		shooter.ticker["shield_observed_target"] = target.id
+		shooter.ticker["shield_observed_count"] = 0
+	shooter.ticker["shield_observed_count"] = int(shooter.ticker["shield_observed_count"]) + 1
+	shooter.ticker["shield_observed_t"] = t
+
+
+func _hit(a, zn: Array, lat: float, u: Vector2, shooter, energy := 1.0, walls := 0, intended = null) -> void:
 	var zone: String = zn[0]
 	a.ticker["fire_t"] = t
 	a.ticker["fire_from"] = shooter.pos
@@ -2770,7 +2948,19 @@ func _hit(a, zn: Array, lat: float, u: Vector2, shooter, energy := 1.0, walls :=
 			emit({"type": "shield", "p": a.pos, "id": a.id, "dir": u})
 			say("%s: shield stops %s's round" % [a.id, shooter.id], "hit")
 			stat["shield"] = stat.get("shield", 0) + 1
+			diagnose("shield_stop", shooter, {"defender": a.id, "defender_team": a.team,
+				"weapon": shooter.wid(shooter.active), "penetration": sw["pen"], "zone": zone,
+				"angle_deg": rad_to_deg(absf(angle_difference(a.body_dir, from_dir))),
+				"distance": shooter.pos.distance_to(a.pos), "walls": walls, "energy": energy,
+				"intended": intended == a, "friendly": shooter.faction == a.faction})
+			# Only an aimed, directly visible enemy stop informs the shooter's AI.
+			# A stray, friendly hit, or impact through a wall is not omniscient knowledge.
+			if intended == a and walls == 0 and shooter.fighting() and shooter.faction != a.faction and visible(shooter, a):
+				_notice_shield_stop(shooter, a)
 			return
+	if intended == a and shooter.ticker.get("shield_observed_target", "") == a.id:
+		shooter.ticker.erase("shield_observed_target")
+		shooter.ticker.erase("shield_observed_count")
 	# soft armour stops a pistol round or buckshot to the chest from any side (v0.6)
 	if zone == "chest" and a.vest and VEST_STOPS.has(sw["pen"]) and a.plates <= 0:
 		a.ticker["flinch_until"] = maxf(a.ticker.get("flinch_until", -1.0), t + 0.25)
@@ -3057,7 +3247,7 @@ func _passive(o) -> void:
 			o.recoil *= exp(-DT / tr)
 		else:
 			o.recoil *= 0.92
-	if o.dormant and o.stress <= 0.0:
+	if o.dormant and o.stress <= 0.0 and o.habit_stress <= 0.0:
 		return
 	if not o.alive():
 		if o.state == "down" and not o.carried and not o.ticker.get("treated", false) and t - float(o.ticker.get("down_t", t)) >= BLEED_OUT:
@@ -3075,7 +3265,10 @@ func _passive(o) -> void:
 		# spell - an element consolidated in a cleared room - is the rally reset.
 		var rally: bool = t - o.last_stress_t > RALLY_QUIET and t - o.last_enemy_seen_t > RALLY_QUIET
 		var decay: float = RALLY_DECAY if rally else STRESS_DECAY
-		o.stress = maxf(minf(o.stress, float(o.ech.get("stress0", 0.0))), o.stress - decay * DT)
+		var baseline: float = float(o.ech.get("stress0", 0.0))
+		var habit_baseline := Habits.habit_stress_gain(clampf(baseline, 0.0, 0.5), float(o.ech.get("resist", 0.0)))
+		o.stress = maxf(minf(o.stress, baseline), o.stress - decay * DT)
+		o.habit_stress = maxf(minf(o.habit_stress, habit_baseline), o.habit_stress - decay * DT)
 
 
 func _check_end() -> void:
