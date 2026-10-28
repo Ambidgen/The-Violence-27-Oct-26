@@ -84,7 +84,10 @@ func alarm(o, p: Vector2, why: String) -> void:
 	o.ticker["threat_p"] = p
 	o.ticker["alarm_t"] = w.t
 	o.last_stress_t = w.t
-	o.stress = minf(1.0, o.stress + (0.3 if why == "near miss" else 0.12))
+	var amount := 0.3 if why == "near miss" else 0.12
+	o.stress = minf(1.0, o.stress + amount)
+	# A concealed attacker may later reveal and use its bad-habit thresholds.
+	w.add_habit_stress(o, amount)
 	if o.cstate == "unaware":
 		o.cstate = "alarmed"
 		w.say("%s (civilian) %s" % [o.id, {"gunfire": "hears gunfire", "gun": "sees a gun", "near miss": "has a round go past",

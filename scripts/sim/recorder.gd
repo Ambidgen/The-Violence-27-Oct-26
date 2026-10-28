@@ -4,6 +4,8 @@ extends RefCounted
 ## the falls and the shouted words. Rewinding only reads this record: the simulation
 ## never goes back, so rewind is a way of looking, not of changing anything.
 
+const Palette = preload("res://scripts/view/palette.gd")
+
 const EVERY := 15            # ticks between snapshots (2 per simulated second)
 const STRIDE := 6            # floats per person: x, y, body, muzzle, state, flags
 
@@ -28,8 +30,14 @@ func _init(world) -> void:
 		doors0 = w.level.door_states()
 	for o in w.ops:
 		ids.append(o.id)
+		# Record presentation metadata separately from the simulation. The revealed
+		# look is stored even for a disguised attacker; snapshot flags keep them
+		# looking like a civilian until the actual reveal.
 		info.append({"team": o.team, "civ": o.civ and not o.attacker, "attacker": o.attacker, "judges": o.judges,
-			"name": o.name, "faction": o.faction, "primary": o.kit.get("primary", ""), "secondary": o.kit.get("secondary", "")})
+			"name": o.name, "faction": o.faction, "primary": o.kit.get("primary", ""), "secondary": o.kit.get("secondary", ""),
+			"look": Palette.look(o, w, true), "disguise_id": Palette.disguise_id(o, w) if o.attacker else "",
+			"medic": o.medic, "armour": o.kit.get("armour", "none"),
+			"head": o.kit.get("head", "none"), "mask": o.gear.has("gas_mask"), "shield": o.shield, "ram": int(o.gear.get("ram", 0)) > 0})
 	snap()
 
 
@@ -72,6 +80,8 @@ func snap() -> void:
 			fl |= 512
 		if o.cstate in ["comply", "hostage", "escorted", "safe"]:
 			fl |= 1024
+		if o.helmet or o.helmet_ballistic:
+			fl |= 2048
 		var k := i * STRIDE
 		a[k] = o.pos.x
 		a[k + 1] = o.pos.y

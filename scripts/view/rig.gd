@@ -123,7 +123,9 @@ func set_look(key: String) -> void:
 	var si := int(_seed * 1000.0)
 	skin = SKINS[si % SKINS.size()]
 	rim = {"a": Color(0.66, 0.78, 0.96, 0.85), "pd": Color(0.66, 0.78, 0.96, 0.85), "qrf": Color(0.66, 0.78, 0.96, 0.85),
-		"b": Color(0.9, 0.72, 0.48, 0.8)}.get(key, Color(0, 0, 0, 0))
+		"patrol": Color(0.66, 0.78, 0.96, 0.85), "swat": Color(0.66, 0.78, 0.96, 0.85), "riot": Color(0.66, 0.78, 0.96, 0.85),
+		"b": Color(0.9, 0.72, 0.48, 0.8), "hood": Color(0.9, 0.72, 0.48, 0.8), "leather": Color(0.9, 0.72, 0.48, 0.8),
+		"workcoat": Color(0.9, 0.72, 0.48, 0.8), "track": Color(0.9, 0.72, 0.48, 0.8), "vestlook": Color(0.9, 0.72, 0.48, 0.8)}.get(key, Color(0, 0, 0, 0))
 	if key == "c":
 		sleeve = COATS[(si / 7) % COATS.size()]
 		var m := ShaderMaterial.new()
@@ -134,6 +136,14 @@ func set_look(key: String) -> void:
 	else:
 		torso.material = null
 		down_body.material = null
+	head.material = null
+	if key in ["patrol", "swat", "riot", "hood", "leather", "workcoat", "track", "vestlook"]:
+		# Heads and fallen bodies share the same skin tone as the animated hands.
+		var skin_mat := ShaderMaterial.new()
+		skin_mat.shader = preload("res://shaders/character_skin.gdshader")
+		skin_mat.set_shader_parameter("skin_tone", skin)
+		head.material = skin_mat
+		down_body.material = skin_mat
 	torso.texture = Decals.tex("op/%s_torso" % key)
 	head.texture = Decals.tex("op/%s_head" % key)
 	down_body.texture = Decals.tex("op/%s_down" % key) if death_k < 0 else Decals.tex("op/%s_dead%d" % [key, death_k])

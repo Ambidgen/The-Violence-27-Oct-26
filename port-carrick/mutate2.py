@@ -1,9 +1,13 @@
 """mutation tests for the v4 rules: each injected contradiction must be caught"""
-import json, copy, validate_city as V
+import json, copy, os, sys, tempfile, validate_city as V
 D=json.load(open('city.json'))
 def run(name, fn, want):
-    d=copy.deepcopy(D); fn(d); json.dump(d,open('/tmp/mut2.json','w'))
-    rep=V.validate('/tmp/mut2.json'); fails=[c['id'] for c in rep['checks'] if not c['ok']]
+    d=copy.deepcopy(D); fn(d)
+    with tempfile.TemporaryDirectory(prefix="port-carrick-mutation-") as tmp:
+        path=os.path.join(tmp, "city.json")
+        with open(path, "w") as f: json.dump(d, f)
+        rep=V.validate(path)
+    fails=[c['id'] for c in rep['checks'] if not c['ok']]
     ok=any(w in fails for w in want)
     print(f"{'CAUGHT' if ok else 'MISSED'} {name:62s} -> {fails}")
     return ok
@@ -54,4 +58,7 @@ def ms():
         b=d['water']['basins']['Grain Basin']; p=b['piers'][0]; p[3]=-150.0
     r.append(run('a Grain Basin pier pushed into the river',pier,['GE3','GE3c']))
     print(sum(r),'of',len(r),'caught')
-ms()
+    return all(r)
+
+if __name__ == '__main__':
+    sys.exit(0 if ms() else 1)

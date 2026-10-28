@@ -5,20 +5,47 @@ The definitive map of the game's city, **generated rather than drawn**: one dete
 level-design touches downstream (streets, addresses, landmarks, situation sites, wards) is meant to read from
 `city.json` and never contradict it.
 
-This track is **separate from the Godot game** in the repository root: it has its own version (city model **v0.4**),
-its own docs and its own roadmap, and nothing in the game reads it yet.
+The model has its own version (**v0.4**). The Godot game reads the generated JSON for new campaign locations, ward trust, visibility and the weekly board overview. Tactical layouts are still schematic proxies; the model and the game's release/version numbers are separate.
 
 ## Run it
 
+Run from this directory (`cd port-carrick` from the repository root):
+
 ```sh
-pip install -r requirements.txt          # numpy, scipy, shapely>=2, scikit-image
+python3 -m pip install -r requirements.txt          # numpy, scipy, shapely>=2, scikit-image
 python3 make_city.py city.json           # ~1 minute; seed 1995; exits non-zero if any validator rule fails
+python3 validate_city.py city.json       # validate the existing output without regenerating it
 python3 build_viewer.py city.json        # writes port-carrick-map.html (open in a browser)
 python3 mutate.py && python3 mutate2.py  # 36 mutation tests: each injected contradiction must be caught
 ```
 
-Verified 2026-10-27: the pipeline regenerates the committed `city.json` **byte for byte**, 74/74 validator rules pass,
-and all 36 mutation tests (10 original + 26 for the v4 rules) are caught.
+Checked 2026-10-27: 74/74 validator rules passed, regeneration matched the committed JSON byte for byte, and all 36 mutation tests (10 + 26) were caught.
+
+Validation checks the generated data independently of the report embedded in the JSON. To avoid overwriting the committed file during a reproducibility check, use `python3 make_city.py /tmp/port-carrick-city.json` and compare that file with `city.json`. Both mutation scripts return nonzero if an injected contradiction is missed; the second also checks the expected rule IDs. Regeneration can depend on Python dependency versions: review any output diff rather than accepting it blindly.
+
+## Using the model in the game
+
+`../scripts/campaign/city.gd` validates the consumed data, caches a compact subset and maps the following official site IDs to existing playable layouts. IDs, type codes, names, addresses, ward and visibility come from `city.json`; the map number is a deliberately hand-authored **proxy**, not a claim that the drawn floorplan is the actual building. The site list in `sites_src.json` remains the generator input.
+
+| Campaign type | Canonical site IDs | Tactical proxy |
+| --- | --- | --- |
+| Warrant | `front-st-flat`, `foundry-row-warrant` | 05 Duplex |
+| Warrant | `heights-villa` | 06 Ranch |
+| Crew house | `mill-squat`, `warehouse-row-7` | 08 Warehouse |
+| Crew house | `riverside-homes-block` | 10 Apartments |
+| Barricade | `brass-rail` | 03 Corner Store |
+| Barricade | `floodwall-shed` | 01 Lone Cabin |
+| Barricade | `bluff-rd-bungalow`, `harlan-ave-bungalow` | 04 Center Hall |
+| Hostage | `yard-office` | 08 Warehouse |
+| Hostage | `kilbride-corner-store` | 03 Corner Store |
+| Hostage | `wharf-st-flat` | 05 Duplex |
+| Public event | `civic-plaza-rally` | 11 Civic Plaza |
+
+Other authored sites are retained in the model but are not placed on a recurring board until a suitable layout and simulation exist. The Bridge Street eviction is a historical event, not a repeating call. The board overview draws ward/water geometry, selected major roads and numbered situation pins; it is not a full building-level navigator. Wards map to the game's existing save order: Northgate, Riverside, Old Town, Ironworks, Eastport, Kilbride.
+
+New situations snapshot their site metadata; existing saved boards keep their original values and appear unlocated if they have no canonical position. If the resource or its mapped-site contract is invalid, the adapter warns and falls back to explicitly unlocated calls with no invented ward. The JSON is included by the project/export presets; Python and the full validator are not needed at runtime.
+
+When changing the city, regenerate and independently validate it, update the explicit mapping only for compatible layouts, and run `tests/city_integration_test.gd` plus the game regression suites. Renaming or deleting a mapped ID intentionally trips the adapter instead of silently relocating calls. Changes to city choices also alter campaign determinism cases; review those diffs before regenerating the fixture. A generator change does not update already-saved boards.
 
 ## Files
 
@@ -46,13 +73,10 @@ reaches; ferry, swing/lift, rail lift and the 1958 viaduct as the last crossing;
 utilities with validated fall lines; dual-bank services with three bridge-closure scenarios; causal abandonment for five
 ghost districts. All nine items of the Canon critique's change list are implemented.
 
-**Next (not started):**
+**Next:**
 1. The author's edit pass: the model was built to be edited by hand and then locked as the definitive map.
-2. Bind the game to it: nothing in the Godot project loads `city.json` yet. Candidates are situations, ward trust and
-   the 25 sites.
-3. Place levels on the map. The 1.5 level list (see `../docs/design/LEVEL_DESIGN_CONSTRAINTS.md`) names four new maps in
-   Tannery Flats, Ironworks, Riverside and Cinder Hollow; each should be pinned to an address in `city.json`.
-4. Decide whether the bridge-closure scenarios become a campaign mechanic (the critique called it "a gameplay gift").
+2. Replace the tactical proxies with site-appropriate layouts. The 1.5 level list (see `../docs/design/LEVEL_DESIGN_CONSTRAINTS.md`) names four new maps in Tannery Flats, Ironworks, Riverside and Cinder Hollow; those maps and the command layer are not in this checkout.
+3. Decide whether the bridge-closure scenarios become a campaign mechanic (the critique called it "a gameplay gift").
 
 ## Invented assumptions (veto freely)
 

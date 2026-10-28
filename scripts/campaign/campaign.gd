@@ -30,6 +30,7 @@ var legacy_path := "user://legacy.json"   # 1.3: where finished runs are recorde
 # Presentation history is additive save data: it never enters simulation decisions.
 var short_history := {}         # key -> week last played; each shipped short once per campaign
 var short_last_week := -99
+var _recovered_path := ""      # preserve the known-good .bak on the first save after recovery
 const SHORT_COOLDOWN_WEEKS := 3
 
 
@@ -37,6 +38,10 @@ const SHORT_COOLDOWN_WEEKS := 3
 ## campaign (rogue = false) is what the deterministic harnesses replay.
 func start(seed_v: int, rogue := false, legacy_path_v: String = Rogue.LEGACY_PATH) -> void:
 	seed_val = seed_v
+	past = []
+	short_history = {}
+	short_last_week = -99
+	_recovered_path = ""
 	rng.seed = seed_v * 31 + 7
 	dept = Department.new()
 	dept.found(seed_v)
@@ -122,10 +127,12 @@ func get_sit(sid: String) -> Dictionary:
 func committed(except_sid := "") -> Dictionary:
 	var out := {}
 	for s in board:
-		if s["id"] == except_sid and s["status"] == "open":
-			continue
+		# Canvassing commits an officer for the week, including to this call.
 		for oid in s.get("canvass", []):
 			out[oid] = s["id"]
+		# A plan may be edited without treating its existing members as busy.
+		if s["id"] == except_sid and s["status"] == "open":
+			continue
 		for oid2 in plan_members(s):
 			out[oid2] = s["id"]
 	return out
@@ -142,7 +149,7 @@ static func plan_members(s: Dictionary) -> Array:
 ## Fit officers not committed to another situation this week.
 func available_for(sid: String) -> Array:
 	var busy := committed(sid)
-	return dept.available().filter(func(r): return not busy.has(r["id"]) or busy[r["id"]] == sid)
+	return dept.available().filter(func(r): return not busy.has(r["id"]))
 
 
 ## Send one officer to canvass the neighbourhood of a situation: two more tips, and the
@@ -151,11 +158,16 @@ func canvass(sid: String, oid: String) -> Array:
 	var s := get_sit(sid)
 	if s.is_empty() or s["status"] != "open":
 		return []
-	var busy := committed()
+	var busy := committed(sid)
 	if busy.has(oid):
 		return []
-	s["canvass"].append(oid)
 	var r: Dictionary = dept.get_officer(oid)
+	if r.is_empty() or r.get("status", "") != "active":
+		return []
+	# Only after all checks pass, transfer this officer out of this call's plan.
+	for sq in s.get("plan", {}).get("squads", []):
+		sq.get("members", []).erase(oid)
+	s["canvass"].append(oid)
 	var lines: Array = []
 	for k in 2:
 		lines.append(Situations.tip(s, rng, "canvass"))
@@ -176,6 +188,8 @@ func record(sid: String, result: Dictionary) -> void:
 ## The week ends: situations nobody went to are written down, wounds heal, and a new
 ## board fills. Returns readable lines.
 func end_week() -> Array:
+	if over():
+		return []
 	var lines: Array = []
 	if run != null:
 		lines.append_array(run.on_week_end(self))
@@ -210,8 +224,13 @@ func end_week() -> Array:
 
 ## What is kept of a past situation (the full intel and plan are dropped).
 static func _brief_record(s: Dictionary) -> Dictionary:
-	return {"id": s["id"], "week": s["week"], "type": s["type"], "title": s["title"], "ward": s["ward"],
+	var record := {"id": s["id"], "week": s["week"], "type": s["type"], "title": s["title"], "ward": s["ward"],
 		"visibility": s["visibility"], "status": s["status"], "result": s.get("result", {}).duplicate(true)}
+	# Preserve the actual place at the time of the call even if the city is edited later.
+	for key in ["address", "site_id", "site_name", "site_archetype", "ward_id", "city_version", "city_x", "city_y"]:
+		if s.has(key):
+			record[key] = s[key]
+	return record
 
 
 # ================================================================== saving
@@ -223,12 +242,11 @@ func to_data() -> Dictionary:
 
 
 func from_data(d: Dictionary) -> bool:
-	var ver := int(d.get("version", 0))
+	var ver := _save_version(d)
 	if ver < 1 or ver > VERSION:
 		return false
-	# 4.72: as in Department.from_data, a save that parses but lost a key must not
-	# throw here — this runs before the title screen and SaveFile only falls back to
-	# the .bak when the file fails to *parse*, not when it is merely incomplete.
+	# Guard optional fields during boot. load_from also tries the backup when a
+	# parsed primary fails the required department or version checks below.
 	seed_val = int(d.get("seed", 1001))
 	rng.seed = seed_val * 31 + 7
 	rng.state = String(d.get("rng_state", "0")).to_int()
@@ -275,15 +293,35 @@ static func _ints(s: Dictionary) -> void:
 			s[k] = int(s[k])
 
 
+## A malformed version is not a supported save. Never replace a future-version
+## primary with an older backup: a newer game may still be able to read it.
+static func _save_version(d: Dictionary) -> int:
+	var v = d.get("version", 0)
+	if v is int or v is float:
+		return int(v)
+	if v is String and String(v).is_valid_int():
+		return int(v)
+	return 0
+
+
 func save(path := SAVE_PATH) -> bool:
-	return load("res://scripts/campaign/save_file.gd").write_json(path, to_data())
+	var ok: bool = load("res://scripts/campaign/save_file.gd").write_json(path, to_data(), path == _recovered_path)
+	if ok and path == _recovered_path:
+		_recovered_path = ""
+	return ok
 
 
 static func load_from(path := SAVE_PATH):
-	var d = load("res://scripts/campaign/save_file.gd").read_json(path)
-	if d == null:
-		return null
-	var c = load("res://scripts/campaign/campaign.gd").new()
-	if not c.from_data(d):
-		return null
-	return c
+	var saves = load("res://scripts/campaign/save_file.gd")
+	for candidate in [path, path + ".bak"]:
+		var d = saves.read_one_json(candidate)
+		if d == null:
+			continue
+		if candidate == path and _save_version(d) > VERSION:
+			return null
+		var c = load("res://scripts/campaign/campaign.gd").new()
+		if c.from_data(d):
+			if candidate != path:
+				c._recovered_path = path
+			return c
+	return null

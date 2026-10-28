@@ -19,6 +19,9 @@ const OUT := "res://assets/crayon/"
 const VARIANTS := 3
 
 const FIG_LOOKS := ["a", "b", "c", "med", "pmed", "pd", "qrf"]
+# These are authored and baked together by make_character_assets.py. Do not
+# replace their coloured linework with the older generic SVG rasterizer.
+const CHARACTER_LOOKS := ["patrol", "swat", "riot", "hood", "leather", "workcoat", "track", "vestlook"]
 
 
 class Painter extends Node2D:
@@ -45,6 +48,8 @@ func _run(only: String) -> void:
 			keys.append("op/%s_dead%d" % [lk, d])
 	var n := 0
 	for key in keys:
+		if (key.get_base_dir() == "op" and key.get_file().get_slice("_", 0) in CHARACTER_LOOKS) or key == "kit/riot_head":
+			continue
 		if only != "" and not key.begins_with(only):
 			continue
 		var job := _job(key)

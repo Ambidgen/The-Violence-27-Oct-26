@@ -5,6 +5,9 @@ extends SceneTree
 
 const Campaign = preload("res://scripts/campaign/campaign.gd")
 const OpsUI = preload("res://scripts/ui/ops_ui.gd")
+const Front = preload("res://scripts/ui/front.gd")
+const SaveFile = preload("res://scripts/campaign/save_file.gd")
+const FRONT_TEST_PATH := "user://front_ui_test.json"
 
 var fails := 0
 
@@ -12,6 +15,8 @@ var fails := 0
 class FakeMain:
 	var campaign
 	var changes := 0
+	var _placeholder := true
+	var cutscene = null
 
 	func ops_dept_changed() -> void:
 		changes += 1
@@ -44,8 +49,13 @@ func _run() -> void:
 	var ui = OpsUI.new()
 	root.add_child(ui)
 	ui.build(main)
+	ui.show_board()
+	await process_frame
+	_check(ui.city_map.visible and ui.city_map.situations.size() == c.board.size(), "the board displays this week's canonical city pins")
+	_check(OpsUI._ward_label({"city_error": true}) == "ward unavailable", "an unlocated call does not display fabricated ward trust")
 	ui._roster()
 	await process_frame
+	_check(not ui.city_map.visible, "the city overview is hidden on other management screens")
 
 	var pool: Array = c.dept.applicants_now()
 	var hire: Array = _buttons(ui.box).filter(func(b): return String(b.text).begins_with("Hire  ($"))
@@ -68,5 +78,32 @@ func _run() -> void:
 	_check(not c.dept.applicants_now().is_empty(), "a fresh applicant pool appears the next week")
 	ui.queue_free()
 	await process_frame
+	# An unreadable or newer save must not masquerade as a playable placeholder.
+	SaveFile.erase(FRONT_TEST_PATH)
+	var front := Front.new()
+	front.build(main)
+	front._campaign_save_path = FRONT_TEST_PATH
+	root.add_child(front)
+	_check(front._campaign_summary().is_empty(), "an empty save slot offers no continue")
+	_check(SaveFile.write_json(FRONT_TEST_PATH, {"version": Campaign.VERSION + 1}), "the unreadable-save UI fixture writes")
+	var future_save := FileAccess.get_file_as_string(FRONT_TEST_PATH)
+	_check(front._campaign_summary().get("unreadable", false), "a placeholder with an existing unreadable save is identified")
+	front.show_title()
+	await process_frame
+	var continue_count := 0
+	for b in _buttons(front.root, []):
+		if b.text.begins_with("Continue run"):
+			continue_count += 1
+	_check(continue_count == 0, "an unreadable save never offers a fake Continue")
+	front._new_campaign_ask()
+	_check(front.screen == "confirm_new" and FileAccess.get_file_as_string(FRONT_TEST_PATH) == future_save,
+		"starting over an unreadable save requires confirmation without changing the file")
+	_check(c.save(FRONT_TEST_PATH), "the valid-save UI fixture writes")
+	main._placeholder = false
+	_check(front._campaign_summary().get("exists", false), "a loaded campaign still offers Continue")
+	front._new_campaign_ask()
+	_check(front.screen == "confirm_new", "an in-progress loaded campaign still asks before replacement")
+	front.queue_free()
+	SaveFile.erase(FRONT_TEST_PATH)
 	print("ops ui test: %s" % ("ALL OK" if fails == 0 else "%d FAILURES" % fails))
 	quit(1 if fails > 0 else 0)

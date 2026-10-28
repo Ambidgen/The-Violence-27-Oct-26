@@ -13,29 +13,28 @@ extends RefCounted
 
 const Names = preload("res://scripts/data/names.gd")
 const Maps = preload("res://scripts/maps/registry.gd")
+const City = preload("res://scripts/campaign/city.gd")
 
-## The six wards (one per precinct): trust in police (0-100), how isolated they are.
+## Campaign trust defaults, keyed to the generator's ward IDs. Order is save-compatible.
 const WARDS := [
-	{"name": "Northgate", "trust": 58, "isolated": 0.2},
-	{"name": "Riverside", "trust": 40, "isolated": 0.4},
-	{"name": "Old Town", "trust": 62, "isolated": 0.0},
-	{"name": "Ironworks", "trust": 24, "isolated": 0.9},
-	{"name": "Eastport", "trust": 44, "isolated": 0.5},
-	{"name": "Kilbride", "trust": 30, "isolated": 0.7},
+	{"id": "northgate", "name": "Northgate", "trust": 58, "isolated": 0.2},
+	{"id": "riverside", "name": "Riverside", "trust": 40, "isolated": 0.4},
+	{"id": "oldtown", "name": "Old Town", "trust": 62, "isolated": 0.0},
+	{"id": "ironworks", "name": "Ironworks", "trust": 24, "isolated": 0.9},
+	{"id": "eastport", "name": "Eastport", "trust": 44, "isolated": 0.5},
+	{"id": "kilbride", "name": "Kilbride", "trust": 30, "isolated": 0.7},
 ]
-const STREETS := ["Alder", "Foundry", "Canal", "Kings", "Water", "Union", "Hope", "Bridge", "Station", "Chapel", "Harbour",
-	"Mill", "Grand", "Market", "Tannery", "Coke Oven", "Ore Dock", "Slag", "Furnace", "Rail"]
 const TYPES := {
 	"warrant": {"name": "Warrant service", "maps": [0, 1, 2, 4, 5, 6], "vis": [1, 3], "pressure": "none",
 		"blurb": "A judge's warrant names a suspect at a residence. You choose the hour; the other occupants and the layout remain uncertain."},
-	"gang": {"name": "Gang house raid", "maps": [2, 4, 5, 7, 8, 9, 10], "vis": [1, 2], "pressure": "low",
-		"blurb": "A crew may be storing guns at this address. The file estimates armed members and residents; it cannot promise a count."},
+	"gang": {"name": "Gang raid", "maps": [2, 4, 5, 7, 8, 9, 10], "vis": [1, 2], "pressure": "low",
+		"blurb": "A crew may be storing guns at this site. The file estimates armed members and bystanders; it cannot promise a count."},
 	"barricade": {"name": "Barricaded suspect", "maps": [0, 1, 3, 4, 6], "vis": [2, 3], "pressure": "low",
-		"blurb": "An armed suspect is holding in a residence. The clock may lower the risk; it cannot guarantee a safe exit."},
+		"blurb": "An armed suspect is holding at the site. The clock may lower the risk; it cannot guarantee a safe exit."},
 	"hostage": {"name": "Hostage", "maps": [0, 3, 4, 5, 6], "vis": [3, 4], "pressure": "high",
 		"blurb": "The caller reports captors and a deadline. The count, location and number of hostages remain uncertain."},
 	"event": {"name": "Public event", "maps": [11], "vis": [5, 5], "pressure": "set by the event",
-		"blurb": "A candidate's rally at Civic Plaza. Assign officers to posts and patrol routes. Most pass without incident; the threat estimate is not a promise."}
+		"blurb": "A candidate's rally. Assign officers to posts and patrol routes. Most pass without incident; the threat estimate is not a promise."}
 }
 const PRESSURE_NAMES := {"none": "None: you pick the hour", "low": "Low", "high": "High: a deadline", "extreme": "Extreme",
 	"set by the event": "Set by the event"}
@@ -69,35 +68,46 @@ static func board(seed_val: int, week: int, trusts := [], community := true) -> 
 	if rng.randf() < 0.35 + week * 0.012:
 		picks.append("event")
 	var out: Array = []
+	var used_sites: Array = []
 	for i in picks.size():
-		out.append(make(picks[i], rng.randi(), week, i, trusts, community))
+		var situation := make(picks[i], rng.randi(), week, i, trusts, community, used_sites)
+		out.append(situation)
+		if situation.get("site_id", "") != "":
+			used_sites.append(situation["site_id"])
 	return out
 
 
 ## One situation of a type, from a seed.
-static func make(type: String, seed_val: int, week := 1, idx := 0, trusts := [], community := true) -> Dictionary:
+static func make(type: String, seed_val: int, week := 1, idx := 0, trusts := [], community := true, used_sites := []) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_val
 	var spec: Dictionary = TYPES[type]
-	var mi: int = spec["maps"][rng.randi() % spec["maps"].size()]
+	var site := City.pick_site(type, seed_val, used_sites)
+	# If the city is missing or incompatible, keep the prototype usable without
+	# inventing an address or applying consequences to an arbitrary ward.
+	var mi: int = int(site["map"]) if not site.is_empty() else int(spec["maps"][0])
 	var lv = Maps.get_level(mi)
-	var ward_i := rng.randi() % WARDS.size()
-	if type == "event":
-		ward_i = 2
-	elif type == "gang" and rng.randf() < 0.5:
-		ward_i = [3, 5, 1][rng.randi() % 3]
-	var ward: Dictionary = WARDS[ward_i]
-	var vr: Array = spec["vis"]
-	var vis := rng.randi_range(vr[0], vr[1])
-	if ward["isolated"] > 0.6 and type != "event":
-		vis = maxi(1, vis - 1)
+	var ward_i: int = City.WARD_IDS.find(String(site.get("ward", "")))
+	var ward: Dictionary = WARDS[ward_i] if ward_i >= 0 else {"name": "Unknown", "trust": 50}
+	var vis: int = int(site["visibility"]) if not site.is_empty() else int(spec["vis"][0])
 	var names = Names.new(seed_val)
-	var addr := "%d %s Street" % [rng.randi_range(3, 240), STREETS[rng.randi() % STREETS.size()]]
+	var addr := String(site.get("address", "Location unavailable"))
 	var s := {"id": "W%d-%d" % [week, idx + 1], "week": week, "type": type, "seed": seed_val, "map": mi,
-		"ward": ward["name"], "ward_i": ward_i, "trust": int(trusts[ward_i]) if ward_i < trusts.size() else ward["trust"], "visibility": vis, "pressure": spec["pressure"],
-		"community": community,
-		"address": addr if type != "event" else "Civic Plaza", "status": "open", "assigned": [], "canvass": [],
+		"ward": ward["name"], "ward_i": ward_i, "trust": int(trusts[ward_i]) if ward_i >= 0 and ward_i < trusts.size() else ward["trust"], "visibility": vis, "pressure": spec["pressure"],
+		# With no verified ward there is no known local group to source tips from.
+		"community": community and ward_i >= 0,
+		"address": addr, "status": "open", "assigned": [], "canvass": [],
 		"night": false, "plan": {}, "result": {}, "occupants": [], "intel": [], "tips": [], "named": ""}
+	if not site.is_empty():
+		s["site_id"] = site["id"]
+		s["site_name"] = site["name"]
+		s["site_archetype"] = site["archetype"]
+		s["ward_id"] = site["ward"]
+		s["city_version"] = City.data().get("version", "unknown")
+		s["city_x"] = float(site["x"])
+		s["city_y"] = float(site["y"])
+	else:
+		s["city_error"] = true
 	var rooms := _rooms(lv)
 	match type:
 		"warrant":
@@ -126,7 +136,7 @@ static func make(type: String, seed_val: int, week := 1, idx := 0, trusts := [],
 		"gang":
 			var crew := rng.randi() % 4
 			var crews := ["Kilbride Crew", "Corvino Family", "Los Halcones", "Zarya Bratva"]
-			s["title"] = "%s house, %s" % [crews[crew], addr]
+			s["title"] = "%s: %s" % [crews[crew], addr]
 			var n := rng.randi_range(3, mini(8, 2 + rooms.size()))
 			var rifles := 0
 			for k3 in n:
@@ -185,14 +195,14 @@ static func make(type: String, seed_val: int, week := 1, idx := 0, trusts := [],
 			s["intel"].append({"key": "deadline", "label": "Deadline", "truth": "they say they start killing at %d minutes" % (s["deadline"] / 60),
 				"est": "", "known": true, "conf": 1.0})
 		"event":
-			var who: Array = ["Mayor Pruett", "Council President Garrow", "Councillor Halvorsen"]
+			var who: Array = ["Royce Kettering", "Dana Okonjo-Vale", "Gordon Pell"]
 			var cand: String = who[rng.randi() % who.size()]
-			s["title"] = "Rally: %s, Civic Plaza" % cand
+			s["title"] = "Rally: %s, %s" % [cand, String(site.get("name", "location unavailable"))]
 			s["candidate"] = cand
 			s["duration"] = 15 * 60
 			s["crowd"] = rng.randi_range(36, 54)
 			# whether anything will happen is rolled now and never shown
-			var p: float = 0.08 + (0.05 if cand == "Council President Garrow" else 0.0) + (0.04 if cand == "Councillor Halvorsen" else 0.0)
+			var p: float = 0.08 + (0.05 if cand == "Dana Okonjo-Vale" else 0.0) + (0.04 if cand == "Gordon Pell" else 0.0)
 			s["attack"] = rng.randf() < p
 			s["attack_p"] = p
 			if s["attack"]:

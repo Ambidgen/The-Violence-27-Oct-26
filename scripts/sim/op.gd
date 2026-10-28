@@ -61,7 +61,8 @@ var state := "ok"       # ok | down | dead
 var wounds := 0
 var arm_hit := false
 var leg_hit := false
-var stress := 0.0
+var stress := 0.0        # raw stress for perception, accuracy, judgment, etc.
+var habit_stress := 0.0  # resistance-adjusted accumulated inputs for bad-habit thresholds
 var last_stress_t := -99.0
 var plates := 0
 var weapons := {}       # "rifle"/"pistol" -> {mag, spare, jam, lost}
@@ -277,6 +278,7 @@ func reset() -> void:
 	alert = alert_floor
 	alert_t = 0.0
 	stress = clampf(float(ech.get("stress0", 0.0)), 0.0, 0.5)
+	habit_stress = Habits.habit_stress_gain(stress, float(ech.get("resist", 0.0)))
 
 
 ## A good habit counts only if the operator has it and no active bad habit overrides it.

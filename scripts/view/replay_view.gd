@@ -45,7 +45,15 @@ func clear() -> void:
 func _look(e: Dictionary) -> String:
 	if int(e["flags"]) & 4:
 		return "c"
-	return "a" if int(e["info"]["team"]) == 0 else "b"
+	# Older in-memory records without a look retain the original team fallback.
+	return String(e["info"].get("look", "a" if int(e["info"]["team"]) == 0 else "b"))
+
+
+func _display_id(e: Dictionary) -> String:
+	var info: Dictionary = e["info"]
+	if (int(e["flags"]) & 4) and info.get("attacker", false):
+		return String(info.get("disguise_id", "CIV"))
+	return String(e["id"])
 
 
 func _sprite_for(e: Dictionary) -> Dictionary:
@@ -57,15 +65,38 @@ func _sprite_for(e: Dictionary) -> Dictionary:
 	var rig = Rig.new()
 	root.add_child(rig)
 	rig.setup(_look(e), hash(id))
+	var info: Dictionary = e["info"]
+	var armour = null
+	if info.get("armour", "none") != "none":
+		armour = rig.wear("kit/plates" if info["armour"] == "plates" else "kit/vest", false)
+	var helmet = null
+	if info.get("head", "none") in ["sof_helmet", "ballistic_helmet"]:
+		helmet = rig.wear("kit/riot_head" if info.get("look", "") == "riot" else "kit/helmet_head", true)
+	var mask = null
+	if info.get("mask", false):
+		mask = rig.wear("kit/gas_mask_head", true)
+	var shield = null
+	if info.get("shield", false):
+		shield = Sprite2D.new()
+		shield.texture = Decals.tex("kit/shield")
+		shield.scale = Vector2.ONE * 0.5
+		root.add_child(shield)
+	var ram = null
+	if info.get("ram", false):
+		ram = Sprite2D.new()
+		ram.texture = Decals.tex("kit/ram")
+		ram.scale = Vector2.ONE * 0.5
+		root.add_child(ram)
 	var gun = rig.gun
 	var body = rig.torso
 	var lab := Label.new()
-	lab.text = id
+	lab.text = _display_id(e)
 	lab.add_theme_font_size_override("font_size", 11)
 	lab.add_theme_color_override("font_color", INK)
 	lab.position = Vector2(-26, -30)
 	root.add_child(lab)
-	var rec_s := {"root": root, "body": body, "gun": gun, "rig": rig, "label": lab, "look": "", "down": false, "t": -1.0}
+	var rec_s := {"root": root, "body": body, "gun": gun, "rig": rig, "label": lab, "look": "", "down": false, "t": -1.0,
+		"helmet": helmet, "armour": armour, "mask": mask, "shield": shield, "ram": ram}
 	sprites[id] = rec_s
 	return rec_s
 
@@ -100,6 +131,7 @@ func show_at(tt: float) -> void:
 		if not shown:
 			continue
 		s["root"].position = (e["p"] as Vector2) * PX
+		s["label"].text = _display_id(e)
 		var rig = s["rig"]
 		var down: bool = int(e["state"]) > 0
 		var lk := _look(e)
@@ -119,7 +151,7 @@ func show_at(tt: float) -> void:
 				rig.stand_up()
 		s["t"] = tt
 		var stance: int = (fl >> 5) & 3
-		var armed: bool = not (fl & 4) and not (fl & 1) and not down
+		var armed: bool = not (fl & 4) and not (fl & 1) and not down and not bool(e["info"].get("medic", false))
 		var wk: String = e["info"].get("primary" if fl & 512 else "secondary", "")
 		rig.set_gun(("w/" + wk) if wk != "" else ("op/rifle" if fl & 512 else "op/pistol"))
 		rig.body_dir = e["body"]
@@ -130,7 +162,9 @@ func show_at(tt: float) -> void:
 		rig.gun_shown = armed
 		rig.ready_low = not (fl & 16)
 		var pose := "aim"
-		if fl & 4:
+		if e["info"].get("medic", false):
+			pose = "unarmed"
+		elif fl & 4:
 			pose = "hands" if fl & 1024 else "unarmed"
 		elif fl & 2:
 			pose = "cuffed"
@@ -143,6 +177,22 @@ func show_at(tt: float) -> void:
 		rig.holster = not (fl & 4) and pose == "holstered"
 		rig.pose = pose
 		rig.advance(_dt, s["root"].position)
+		# Keep equipment under a disguised attacker's civilian appearance.
+		if s["armour"] != null:
+			s["armour"].visible = not (fl & 4)
+		if s["mask"] != null:
+			s["mask"].visible = not (fl & 4)
+		if s["helmet"] != null:
+			s["helmet"].visible = not (fl & 4)
+			s["helmet"].modulate.a = 1.0 if fl & 2048 else 0.45
+		if s["shield"] != null:
+			s["shield"].visible = not down and not (fl & 4)
+			s["shield"].rotation = rig.body_dir
+			s["shield"].position = rig.torso.position + Vector2.from_angle(rig.body_dir) * 13.0
+		if s["ram"] != null:
+			s["ram"].visible = not down and not (fl & 4)
+			s["ram"].rotation = rig.body_dir
+			s["ram"].position = rig.torso.position + Vector2.from_angle(rig.body_dir + PI / 2.0) * 11.0 - Vector2.from_angle(rig.body_dir) * 6.0
 	# the rounds fired since the last frame kick whoever fired them
 	if _last_t >= 0.0 and tt > _last_t and tt - _last_t < 0.6:
 		for sh in rec.shots_between(_last_t, tt):

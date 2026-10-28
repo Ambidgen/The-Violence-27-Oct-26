@@ -104,7 +104,7 @@ static func share(board: Array, sid: String, free: int) -> int:
 const CROWD_TRAUMA := 12.0
 
 
-static func suggest(sit: Dictionary, available: Array, lv, bodycams := false, cap := -1) -> Dictionary:
+static func suggest(sit: Dictionary, available: Array, lv, bodycams := false, cap := -1, issue_kit := true) -> Dictionary:
 	var pool := ranked(available)
 	if sit.get("type", "") == "event":
 		var calm: Array = pool.filter(func(r): return float(r.get("trauma", 0.0)) < CROWD_TRAUMA)
@@ -201,7 +201,7 @@ static func suggest(sit: Dictionary, available: Array, lv, bodycams := false, ca
 				squads[k4]["orders"]["objs"] = [{"kind": "clear", "rooms": []}]
 	# kit (v0.7.5): squads going in carry the entry kit (a ram on the point man, flashbangs
 	# for those trained for them), at a barricade the gas kit (v0.8); the rest keep their own
-	if sit["type"] != "event":
+	if issue_kit and sit["type"] != "event":
 		var by_id := {}
 		for r in available:
 			by_id[r["id"]] = r

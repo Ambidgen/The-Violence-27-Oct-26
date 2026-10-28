@@ -819,9 +819,9 @@ func ops_select(sid: String) -> void:
 			ops_ui.flash = "Veteran chief: no suggested plan. Form the squads yourself on the Force tab."
 		else:
 			var av: Array = campaign.available_for(sid)
-			cur_sit["plan"] = Autoplan.suggest(cur_sit, av, level, dept.bodycams, Autoplan.share(campaign.board, sid, av.size()))
+			cur_sit["plan"] = Autoplan.suggest(cur_sit, av, level, dept.bodycams, Autoplan.share(campaign.board, sid, av.size()), false)
 			cur_sit["suggested"] = cur_sit["plan"].duplicate(true)   # Q4: what the debrief diffs the run against
-			dept.settle_kits()
+			# Opening a briefing must not buy equipment without the chief's consent.
 			if campaign.plan_members(cur_sit).is_empty():
 				ops_ui.flash = "Too few officers are free for this (four through a door, six into a crew house or a hostage taking): the suggestion is to send nobody. You can still assign officers yourself on the Force tab."
 	plan = cur_sit["plan"]
@@ -845,8 +845,7 @@ func ops_suggest() -> void:
 	if bool(Settings.get_v("veteran")):   # Q4: no suggestion to regenerate
 		return
 	var av: Array = campaign.available_for(cur_sit["id"])
-	plan = Autoplan.suggest(cur_sit, av, level, dept.bodycams, Autoplan.share(campaign.board, cur_sit["id"], av.size()))
-	dept.settle_kits()
+	plan = Autoplan.suggest(cur_sit, av, level, dept.bodycams, Autoplan.share(campaign.board, cur_sit["id"], av.size()), false)
 	cur_sit["plan"] = plan
 	cur_sit["suggested"] = plan.duplicate(true)
 	plan_marks.setup(level, nav, cur_sit, plan)
@@ -854,8 +853,6 @@ func ops_suggest() -> void:
 
 
 func ops_canvass(oid: String) -> void:
-	for sq in plan.get("squads", []):
-		sq["members"].erase(oid)
 	campaign.canvass(cur_sit["id"], oid)
 	_save()
 	plan_changed()

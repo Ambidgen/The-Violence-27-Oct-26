@@ -193,7 +193,19 @@ const GOOD := [
 		"without": "Has only what it carries."},
 ]
 
-## kind "stress": active when stress x (1 - resist) >= t - 0.3 x anxiety/100 (off 0.1 below).
+## Stress habits use a separate accumulator. Each stress input contributes
+## amount * (1 - 0.75 * resistance), capped at 1.0; sustained pressure can therefore
+## eventually reach any threshold even for highly resistant operators. The existing
+## 0.1 hysteresis and anxiety adjustment remain. Other stress effects still use the raw
+## stress and their original resistance formulas.
+const HABIT_RESIST_SCALE := 0.75
+
+
+static func habit_stress_gain(amount: float, resistance: float) -> float:
+	return maxf(0.0, amount) * (1.0 - HABIT_RESIST_SCALE * clampf(resistance, 0.0, 1.0))
+
+
+## kind "stress": active when habit stress >= t - 0.3 x anxiety/100 (off 0.1 below).
 ## kind "trait": always active when present (trait >= 60).
 const BAD := [
 	{"id": "BH01", "name": "Freeze", "kind": "stress", "t": 0.85, "trait": "", "over": ["PF07", "PF09", "GD04"],

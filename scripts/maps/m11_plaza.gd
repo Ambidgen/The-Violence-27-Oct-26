@@ -1,6 +1,6 @@
 extends "res://scripts/sim/level.gd"
-## Map 11, Civic Plaza (v0.7): the open square in front of City Hall where the
-## candidates hold their rallies. A stage on the hall steps, a crowd pen behind crowd
+## Map 11, Civic Plaza (v0.7): the open square where the
+## candidates hold their rallies. A stage and a civic pavilion, a crowd pen behind crowd
 ## barriers, a fountain, food trucks, a cafe, the library and a kiosk. Wide open ground
 ## with few walls: everyone can see everyone, and every miss carries into the crowd.
 
@@ -13,19 +13,19 @@ func _init() -> void:
 	id = "m11"
 	map_name = "Civic Plaza"
 	title = "THE VIOLENCE  -  11 CIVIC PLAZA"
-	notes = ["CITY HALL, STAGE, CROWD PEN, CAFE, LIBRARY", "PUBLIC EVENTS  ·  1 SQUARE = 1 m", "MAP 11  ·  SHEET 12 OF 12"]
+	notes = ["CIVIC PAVILION, STAGE, CROWD PEN, CAFE, KIOSK", "PUBLIC EVENTS  ·  1 SQUARE = 1 m", "MAP 11  ·  SHEET 12 OF 12"]
 	W = 64.0
 	H = 46.0
 	time_limit = 900.0
 	default_sizes = [8, 4]
 	fenced = false
-	stage_hint = "Team A forms up on Market Street and the side lanes; team B holds the buildings round the square."
+	stage_hint = "Team A forms up on Bianchi Street and the side lanes; team B holds the buildings round the square."
 
 
 func _build() -> void:
-	# City Hall and the stage on its steps
-	_room("HALL", "CITY HALL", [Rect2(22, 2.5, 12, 6)])
-	_room("OFFICE", "CLERK'S OFFICE", [Rect2(34, 2.5, 8, 6)])
+	# Civic pavilion and the stage
+	_room("HALL", "CIVIC PAVILION", [Rect2(22, 2.5, 12, 6)])
+	_room("OFFICE", "EVENT OFFICE", [Rect2(34, 2.5, 8, 6)])
 	_room("STAGE", "STAGE", [Rect2(25, 9.5, 14, 4)], {"deck": true, "label": Vector2(32, 11.5)})
 	_door(28, 8.5, 2.0, {"id": "HALL DOORS"})
 	_door(34, 5.5, 0.9)
@@ -43,7 +43,7 @@ func _build() -> void:
 	_window(11, 20.6, 1.0)
 	_window(6.0, 15, 1.6)
 	# library on the east side
-	_room("LIBRARY", "LIBRARY", [Rect2(53, 14, 9, 8)])
+	_room("LIBRARY", "READING ROOM", [Rect2(53, 14, 9, 8)])
 	_room("STACKS", "STACKS", [Rect2(53, 22, 9, 6)])
 	_door(53, 17, 1.2, {"id": "LIBRARY DOOR"})
 	_door(57.5, 22, 0.9)
@@ -95,9 +95,9 @@ func _build() -> void:
 	_trunk(Vector2(52.0, 33.0), 3.8)
 	_trunk(Vector2(20.5, 38.0), 3.6)
 	_trunk(Vector2(43.0, 38.5), 3.6)
-	# Market Street along the south edge, cars at the kerb
+	# Bianchi Street along the south edge, cars at the kerb
 	_decor("road", {"r": Rect2(0, 41.0, 64, 5.0), "axis": "h"})
-	_decor("text", {"p": Vector2(0.4, 40.7), "text": "MARKET STREET"})
+	_decor("text", {"p": Vector2(0.4, 40.7), "text": "BIANCHI STREET"})
 	for cx in [7.0, 19.0, 42.0, 55.0]:
 		_p("yard/car", cx, 41.3, 4.4, 1.9, Geom.COVER, 1.45, 0.0, "car")
 	stage_a = [{"r": Rect2(4.0, 43.4, 22.0, 2.4), "face": -PI / 2.0}, {"r": Rect2(38.0, 43.4, 22.0, 2.4), "face": -PI / 2.0},

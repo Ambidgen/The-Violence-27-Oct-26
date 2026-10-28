@@ -529,6 +529,9 @@ func _entry_record(el: Dictionary, m, k: int, may_enter: bool) -> Dictionary:
 	var tgt: Array = _entry_target(m, k, c, n_in, g["inside"], g["s1"], g["e1"], g["e2"], g["depth"])
 	var my_side: Vector2 = tgt[1]
 	d["target"] = _inside_room(w.nav.snap(tgt[0]), el["task"]["into"], c, n_in)
+	if w.diagnostics_enabled and enters:
+		d["diag_pf04_plan_active"] = m.has("PF04")
+		w.diagnose("pf04_entry_plan", m, {"active": m.has("PF04"), "order": k, "room": el["task"]["into"]})
 	var ext: float = g["e1"] if my_side == g["s1"] else g["e2"]
 	d["corner"] = c + n_in * 0.25 + my_side * maxf(ext - 0.25, 0.3)
 	return d
@@ -746,6 +749,10 @@ func _sectors(el: Dictionary, al: Array) -> void:
 		_adopt_sectors(el)
 		return
 	var layout := _sector_layout(el, gd2, fwd)
+	if w.diagnostics_enabled:
+		for m in al:
+			w.diagnose("gd02_sector_plan", m, {"active": m.has("GD02"), "holding": holding,
+				"members": al.size(), "assigned": layout.has(m.id), "immediate": first})
 	if first:
 		el["sectors"] = layout
 		el["sector_pending"] = {}
@@ -1832,7 +1839,155 @@ func _think(o) -> void:
 
 
 # ------------------------------------------------------------------ Rule 1
+## A lane-blocked shooter can briefly prefer a different visible target, but never
+## switches a close Rule-1 threat for a more distant one.
+func _lane_alternative(o, close: bool):
+	if w.t >= float(o.ticker.get("lane_alt_until", -1.0)):
+		o.ticker.erase("lane_alt")
+		return null
+	var e = w.by_id.get(o.ticker.get("lane_alt", ""), null)
+	if e == null or not e.alive() or (o.pos.distance_to(e.pos) <= 10.0) != close or not w.visible(o, e):
+		return null
+	var width := 0.5 if o.has("WD10") or (o.holding and o.has("HD11")) else 0.3
+	return null if w.friend_in_line(o, e.pos, width, 4.0 if o.judges else 0.0) else e
+
+
+## Move to a short, previously validated firing position. If it cannot be reached in
+## time, remember the failed goal and fall back to holding fire, not unsafe shooting.
+func _follow_lane_replan(o, e) -> bool:
+	if not o.ticker.has("lane_goal"):
+		return false
+	var goal: Vector2 = o.ticker["lane_goal"]
+	var expired: bool = w.t > float(o.ticker.get("lane_goal_until", -1.0))
+	var width := 0.5 if o.has("WD10") or (o.holding and o.has("HD11")) else 0.3
+	var still_blocked: bool = w.friend_in_line(o, e.pos, width, 4.0 if o.judges else 0.0)
+	if expired or o.ticker.get("lane_goal_target", "") != e.id or w.at(o, goal, 0.2) or not still_blocked:
+		if expired:
+			o.ticker["lane_failed_goal"] = goal
+			o.ticker["lane_failed_until"] = w.t + 8.0
+		o.ticker.erase("lane_goal")
+		return false
+	w.move_to(o, goal, "walk", 0)
+	if o.path.is_empty() or not _reposition_route_safe(o, e, _remaining_reposition_path(o)):
+		o.ticker["lane_failed_goal"] = goal
+		o.ticker["lane_failed_until"] = w.t + 8.0
+		o.ticker.erase("lane_goal")
+		w.stop(o)
+		return false
+	o.dbg = "reposition for friendly lane > " + e.id
+	w.engage(o, e, _aim_zone(o, e), false)
+	return true
+
+
+## Prototype response to two observed stops by the same shield in six seconds.
+## It never changes shield penetration/durability, invents visibility, or bypasses
+## normal fire authorization and friendly-lane checks. Paths and choices are bounded.
+func _shield_response(o, e) -> bool:
+	if o.ticker.has("shield_goal"):
+		var goal: Vector2 = o.ticker["shield_goal"]
+		var expired: bool = w.t > float(o.ticker.get("shield_goal_until", -1.0))
+		var angle: float = absf(angle_difference(e.body_dir, (o.pos - e.pos).angle()))
+		if expired or o.ticker.get("shield_goal_target", "") != e.id or not e.alive() or not e.shield \
+				or not w.visible(o, e) or w.at(o, goal, 0.3) or angle > deg_to_rad(60.0):
+			o.ticker.erase("shield_goal")
+			o.ticker["shield_next"] = w.t + 3.0
+			w.diagnose("shield_response_end", o, {"target": e.id, "expired": expired, "flanked": angle > deg_to_rad(60.0)})
+			return false
+		w.move_to(o, goal, "walk", 0)
+		if o.path.is_empty() or not _reposition_route_safe(o, e, _remaining_reposition_path(o)):
+			o.ticker.erase("shield_goal")
+			o.ticker["shield_next"] = w.t + 3.0
+			w.stop(o)
+			return false
+		o.dbg = "reposition against shield > " + e.id
+		w.engage(o, e, _aim_zone(o, e), false)
+		return true
+	if o.ticker.get("shield_observed_target", "") != e.id or int(o.ticker.get("shield_observed_count", 0)) < 2 \
+			or w.t - float(o.ticker.get("shield_observed_t", -99.0)) > 6.0 or w.t < float(o.ticker.get("shield_next", -1.0)) \
+			or not e.alive() or not e.shield or not w.visible(o, e):
+		return false
+	var angle: float = absf(angle_difference(e.body_dir, (o.pos - e.pos).angle()))
+	if angle > deg_to_rad(60.0):
+		return false
+	var width := 0.5 if o.has("WD10") or (o.holding and o.has("HD11")) else 0.3
+	var beyond := 4.0 if o.judges else 0.0
+	var alternate = null
+	var best_d := INF
+	for other in w.visible_enemies(o):
+		var d: float = o.pos.distance_to(other.pos)
+		if other == e or (d <= 10.0) != (o.pos.distance_to(e.pos) <= 10.0):
+			continue
+		if other.shield or w.friend_in_line(o, other.pos, width, beyond):
+			continue
+		if d < best_d or (is_equal_approx(d, best_d) and alternate != null and other.id < alternate.id):
+			alternate = other
+			best_d = d
+	if alternate != null:
+		o.ticker["lane_alt"] = alternate.id
+		o.ticker["lane_alt_until"] = w.t + 2.0
+		o.ticker["shield_next"] = w.t + 3.0
+		w.diagnose("shield_response", o, {"target": e.id, "method": "retarget", "alternative": alternate.id})
+		w.engage(o, e, _aim_zone(o, e), false)
+		return true
+	# Try a flank at the current range, not a charge towards the shield. Reject
+	# long/unsafe paths and spots which cannot see the bearer or clear friendly lanes.
+	var radius: float = maxf(3.0, o.pos.distance_to(e.pos))
+	var best_goal := Vector2.INF
+	var best_length := 8.0
+	for sign in [1.0, -1.0]:
+		var q: Vector2 = e.pos + Vector2.from_angle(e.body_dir + sign * deg_to_rad(75.0)) * radius
+		if q.x < 0.0 or q.y < 0.0 or q.x >= w.level.W or q.y >= w.level.H or not w.nav.is_free(q):
+			continue
+		if w._lane_friend(o, q, e.pos, width, beyond) != null or not w.geom.sight_clear(q, o.eye(), e.pos, e.zone_centre("chest")):
+			continue
+		var path: PackedVector2Array = w.nav.find_path(0, o.pos, q, o.avoid_key)
+		if path.size() < 2 or w.nav.path_length(path) >= best_length or not _reposition_route_safe(o, e, path):
+			continue
+		best_goal = q
+		best_length = w.nav.path_length(path)
+	if best_goal != Vector2.INF:
+		o.ticker["shield_goal"] = best_goal
+		o.ticker["shield_goal_target"] = e.id
+		o.ticker["shield_goal_until"] = w.t + minf(6.0, maxf(3.0, best_length / 1.3 + 0.5))
+		w.diagnose("shield_response", o, {"target": e.id, "method": "flank", "distance": best_length})
+		return _shield_response(o, e)
+	o.ticker["shield_next"] = w.t + 3.0
+	w.diagnose("shield_response", o, {"target": e.id, "method": "no_safe_option"})
+	return false
+
+
+## Re-check the untraversed path as teammates move; discard an interrupted or
+## newly unsafe replan rather than continuing into a live friendly lane.
+func _remaining_reposition_path(o) -> PackedVector2Array:
+	var path := PackedVector2Array([o.pos])
+	for i in range(o.path_i, o.path.size()):
+		path.append(o.path[i])
+	return path
+
+
+func _reposition_route_safe(o, e, path: PackedVector2Array) -> bool:
+	if path.size() < 2:
+		return false
+	var mates: Array = w.mates_near(o, 12.0)
+	for i in range(1, path.size()):
+		var a: Vector2 = path[i - 1]
+		var b: Vector2 = path[i]
+		var near_enemy := Geometry2D.get_closest_point_to_segment(e.pos, a, b)
+		if near_enemy.distance_to(e.pos) < minf(2.0, o.pos.distance_to(e.pos) * 0.8):
+			return false
+		if _pos_in_line_of_fire(o, b, mates) or _pos_in_line_of_fire(o, a.lerp(b, 0.5), mates):
+			return false
+		for m in mates:
+			var nearest := Geometry2D.get_closest_point_to_segment(m.pos, a, b)
+			if nearest.distance_to(m.pos) < 0.5 and (b.distance_to(m.pos) < 0.55 or nearest.distance_to(m.pos) < o.pos.distance_to(m.pos) - 0.02):
+				return false
+	return true
+
+
 func _close_threat(o):
+	var alternative = _lane_alternative(o, true)
+	if alternative != null:
+		return alternative
 	var best = null
 	var best_d := 10.0001
 	var cur: String = o.aim.get("tid", "")
@@ -1891,6 +2046,8 @@ func _rule1(o, e) -> void:
 			_transition(o)
 		else:
 			_clear(o)
+		return
+	if _follow_lane_replan(o, e) or _shield_response(o, e):
 		return
 	if o.has("PF07") and o.sidestep.is_empty() and not o.ticker.has("pf07_" + e.id) and e.alive():
 		o.ticker["pf07_" + e.id] = true
@@ -1998,37 +2155,127 @@ func _rule2(o) -> void:
 	var which := _reload_choice(o)
 	if which == "":
 		o.dbg = "out of ammo"
-		_seek_cover(o, threats)
+		_seek_cover(o, threats, "out_of_ammo")
 		return
 	if threats.is_empty() or _hidden(o.pos, threats, 0.82):
 		w.stop(o)
 		if not threats.is_empty():
 			o.stance_goal = Op.DUCK
 			o.ticker["duck_action"] = true
-		o.ticker.erase("cover_wait")
+		_cover_reset(o)
 		_reload(o, which, true)
 		return
-	_seek_cover(o, threats)
+	if _seek_cover(o, threats, "rule2") == "fallback":
+		# With both guns dry and no reachable cover, remaining helpless forever is
+		# worse than a crouched emergency reload. Do not claim it is behind cover.
+		w.stop(o)
+		o.stance_goal = Op.DUCK
+		o.ticker["duck_action"] = true
+		o.dbg = "RULE 2 > exposed emergency reload"
+		w.say("%s reloads exposed after cover attempts failed" % o.id, "rule")
+		_cover_reset(o)
+		_reload(o, which, false)
 
 
-func _seek_cover(o, threats: Array) -> void:
-	if threats.is_empty():
-		return
+## Keep a bounded search episode, distinct from the cached candidate. Reaching a
+## point is never itself success: only actual concealment from the current threats is.
+func _seek_cover(o, threats: Array, context := "other") -> String:
+	if threats.is_empty() or _hidden(o.pos, threats, 0.82):
+		_cover_reset(o)
+		if not threats.is_empty():
+			w.stop(o)
+			o.stance_goal = Op.DUCK
+		return "hidden"
+	if w.t - float(o.ticker.get("cover_last", -99.0)) > 2.0:
+		_cover_reset(o)
+	if not o.ticker.has("cover_since"):
+		o.ticker["cover_since"] = w.t
+		o.ticker["cover_failures"] = 0
+		w.diagnose("cover_search_start", o, {"context": context, "threats": threats.size()})
+		if context in ["rule2", "topup"]:
+			w.diagnose("reload_blocked", o, {"context": context, "reason": "exposed_to_known_threat"})
+	o.ticker["cover_last"] = w.t
+	if int(o.ticker.get("cover_failures", 0)) >= 3 or w.t - float(o.ticker["cover_since"]) > 14.0:
+		if not o.ticker.get("cover_fallback_reported", false):
+			w.diagnose("cover_fallback", o, {"context": context, "failures": int(o.ticker["cover_failures"])})
+			o.ticker["cover_fallback_reported"] = true
+		o.dbg += " (no reachable concealment)"
+		w.stop(o)
+		o.stance_goal = Op.DUCK
+		return "fallback"
+	if w.t < float(o.ticker.get("cover_retry_at", -1.0)):
+		o.dbg += " (replanning cover)"
+		w.stop(o)
+		return "searching"
 	var dest = _cover_point(o, threats)
 	if dest == null:
 		o.dbg += " (finding cover)"
 		w.stop(o)
-		return
+		# The ordinary 0.4 s decision delay is not a failed search.
+		if w.t >= float(o.ticker.get("cover_wait", -1.0)):
+			_cover_fail(o, null, "no_candidate")
+		return "searching"
+	# Threats may have moved since this point was cached.
+	if not _hidden(dest, threats, 0.82):
+		_cover_fail(o, dest, "candidate_exposed")
+		return "searching"
+	if not o.ticker.has("cover_route") or (o.ticker["cover_route"] as Vector2).distance_to(dest) > 0.1:
+		o.ticker["cover_route"] = dest
+		o.ticker["cover_progress_p"] = o.pos
+		o.ticker["cover_progress_t"] = w.t + 1.5
+		o.ticker.erase("path_fail_until")
+	# The mover itself stops within 0.08 m. If this is still exposed, choose a
+	# different candidate rather than repeatedly declaring a near point reached.
+	if w.at(o, dest, 0.09):
+		_cover_fail(o, dest, "arrival_exposed")
+		return "searching"
 	o.dbg += " > cover"
 	var prof := 0 if o.hb("BH10") else -1
-	if not w.at(o, dest, 0.3):
-		w.move_to(o, dest, "run", prof)
-	else:
-		w.stop(o)
-		o.stance_goal = Op.DUCK
+	w.move_to(o, dest, "run", prof)
+	if o.path.is_empty():
+		_cover_fail(o, dest, "no_path")
+		return "searching"
+	if w.t >= float(o.ticker["cover_progress_t"]):
+		if o.pos.distance_to(o.ticker["cover_progress_p"]) < 0.12 and not w.door_ahead(o):
+			_cover_fail(o, dest, "no_progress")
+			return "searching"
+		o.ticker["cover_progress_p"] = o.pos
+		o.ticker["cover_progress_t"] = w.t + 1.5
 	var lk = _latest_lkp(o)
 	if lk != null:
 		o.look_goal = (lk["p"] - o.pos).angle()
+	return "moving"
+
+
+func _cover_failed(o, p: Vector2) -> bool:
+	for failure in o.ticker.get("cover_failed", []):
+		if w.t < float(failure["until"]) and p.distance_to(failure["p"]) < 0.35:
+			return true
+	return false
+
+
+func _cover_fail(o, p, reason: String) -> void:
+	w.diagnose("cover_replan", o, {"reason": reason, "attempt": int(o.ticker.get("cover_failures", 0)) + 1})
+	if p != null:
+		var failed: Array = o.ticker.get("cover_failed", [])
+		failed = failed.filter(func(f): return w.t < float(f["until"]))
+		failed.append({"p": p, "until": w.t + 8.0})
+		# A short-lived, bounded blacklist, not an ever-growing per-operator history.
+		if failed.size() > 8:
+			failed.pop_front()
+		o.ticker["cover_failed"] = failed
+	o.ticker["cover_failures"] = int(o.ticker.get("cover_failures", 0)) + 1
+	o.ticker["cover_retry_at"] = w.t + 0.4
+	o.ticker.erase("cover_route")
+	o.ticker.erase("cover_dest")
+	o.ticker.erase("cover_cache")
+	o.ticker.erase("path_fail_until")
+	w.stop(o)
+
+
+func _cover_reset(o) -> void:
+	for key in ["cover_since", "cover_last", "cover_failures", "cover_retry_at", "cover_route", "cover_progress_p", "cover_progress_t", "cover_wait", "cover_dest", "cover_fallback_reported"]:
+		o.ticker.erase(key)
 
 
 func _reload_choice(o) -> String:
@@ -2040,6 +2287,10 @@ func _reload_choice(o) -> String:
 
 
 func _reload(o, which: String, from_rule2: bool) -> void:
+	if w.diagnostics_enabled:
+		var known := _threats(o)
+		w.diagnose("reload_started", o, {"weapon": which, "rule2": from_rule2,
+			"known_threats": known.size(), "concealed": known.is_empty() or _hidden(o.pos, known, 0.82)})
 	var dur: float = Habits.WEAPONS[which]["reload"] * o.ech["reload"]
 	if which != o.active:
 		dur += o.ech["transition"]
@@ -2070,8 +2321,10 @@ func _stoppage(o) -> void:
 		return
 	var threats := _threats(o)
 	if o.has("WD03") and not threats.is_empty() and not _hidden(o.pos, threats, 0.82):
-		_seek_cover(o, threats)
-		return
+		if _seek_cover(o, threats, "stoppage") != "fallback":
+			return
+		w.say("%s clears a stoppage exposed after cover attempts failed" % o.id, "rule")
+	_cover_reset(o)
 	w.stop(o)
 	if not threats.is_empty():
 		o.stance_goal = Op.DUCK
@@ -2109,10 +2362,12 @@ func _hidden(p: Vector2, threats: Array, head_z: float) -> bool:
 func _cover_point(o, threats: Array):
 	if o.has("PF09"):
 		var cache: Dictionary = o.ticker.get("cover_cache", {})
-		if not cache.is_empty() and cache["p"] != null and w.t - cache["t"] < 0.8:
+		if not cache.is_empty() and cache["p"] != null and w.t - cache["t"] < 0.8 \
+				and not _cover_failed(o, cache["p"]) and _hidden(cache["p"], threats, 0.82):
 			return cache["p"]
 		return _find_cover(o, threats, true)
-	if o.ticker.has("cover_dest") and w.t - o.ticker["cover_dest_t"] < 3.0:
+	if o.ticker.has("cover_dest") and o.ticker["cover_dest"] != null and w.t - o.ticker["cover_dest_t"] < 3.0 \
+			and not _cover_failed(o, o.ticker["cover_dest"]) and _hidden(o.ticker["cover_dest"], threats, 0.82):
 		return o.ticker["cover_dest"]
 	if not o.ticker.has("cover_wait"):
 		o.ticker["cover_wait"] = w.t + 0.4
@@ -2137,7 +2392,7 @@ func _find_cover(o, threats: Array, smart: bool):
 			break
 		var c: Dictionary = item[1]
 		var p: Vector2 = c["p"]
-		if not _hidden(p, threats, 0.82):
+		if _cover_failed(o, p) or not _hidden(p, threats, 0.82):
 			continue
 		var sc := d
 		if smart:
@@ -2228,6 +2483,9 @@ func _jumpy(o) -> bool:
 
 # ------------------------------------------------------------------ P4
 func _far_target(o):
+	var alternative = _lane_alternative(o, false)
+	if alternative != null:
+		return alternative
 	var vis: Array = w.visible_enemies(o)
 	if vis.is_empty():
 		return null
@@ -2271,6 +2529,8 @@ func _engage_far(o, e) -> void:
 		o.dbg = "hiding"
 		o.stance_goal = Op.DUCK
 		w.stop(o)
+		return
+	if _follow_lane_replan(o, e) or _shield_response(o, e):
 		return
 	# under fire at range, trained shooters move to a fighting position: hidden when
 	# ducked, able to shoot over the cover when crouched
@@ -2472,11 +2732,19 @@ func _maintain(o) -> bool:
 			want = o.active
 	if want == "":
 		return false
+	if w.t < float(o.ticker.get("reload_defer_until", -1.0)) and int(o.ws()["mag"]) > 0:
+		return false
 	var threats := _threats(o)
 	if o.has("WD03") and not threats.is_empty() and not _hidden(o.pos, threats, 0.82):
 		o.dbg = "to cover to reload"
-		_seek_cover(o, threats)
-		return true
+		if _seek_cover(o, threats, "topup") != "fallback":
+			return true
+		# Unlike Rule 2, a tactical top-up is optional while this weapon still has
+		# ammunition. Keep it available and reconsider cover after a short delay.
+		_cover_reset(o)
+		o.ticker["reload_defer_until"] = w.t + 5.0
+		return false
+	_cover_reset(o)
 	w.stop(o)
 	_reload(o, want, false)
 	return true
@@ -2763,6 +3031,10 @@ func _task_assault(o, tm: Dictionary, el: Dictionary) -> void:
 				return
 			var target: Vector2 = d["target"]
 			if not w.at(o, target, 0.3):
+				if w.diagnostics_enabled and not d.get("diag_pf04_started", false):
+					d["diag_pf04_started"] = true
+					w.diagnose("pf04_entry_move", o, {"planned_active": d.get("diag_pf04_plan_active", false),
+						"active_now": o.has("PF04"), "order": d["order"], "room": st["into"]})
 				_go(o, target, "sprint" if o.hb("BH11") else "entry", false, o.hb("BH11"))
 			else:
 				w.stop(o)
@@ -3000,6 +3272,7 @@ func _scan(o, tm: Dictionary) -> void:
 			cands.append({"p": l["p"], "w": 4.0, "k": "l" + eid})
 	var best = null
 	var best_s := -1.0
+	var sector_excluded := 0
 	for c in cands:
 		var p: Vector2 = c["p"]
 		var d: float = o.pos.distance_to(p)
@@ -3007,6 +3280,7 @@ func _scan(o, tm: Dictionary) -> void:
 			continue
 		var dir: float = (p - o.pos).angle()
 		if sector != null and absf(angle_difference(dir, sector)) > half:
+			sector_excluded += 1
 			continue
 		if not w.geom.sight_clear(o.pos, o.eye(), p, 1.2):
 			continue
@@ -3015,6 +3289,9 @@ func _scan(o, tm: Dictionary) -> void:
 		if sc > best_s:
 			best_s = sc
 			best = c
+	if w.diagnostics_enabled:
+		w.diagnose("gd02_scan", o, {"active": o.has("GD02"), "has_sector": sector != null,
+			"candidates": cands.size(), "excluded_by_sector": sector_excluded, "selected": best != null})
 	if best != null:
 		o.look_goal = (best["p"] - o.pos).angle()
 		o.ticker["ll_" + best["k"]] = w.t
